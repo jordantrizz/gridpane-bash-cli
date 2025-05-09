@@ -1,47 +1,46 @@
 #!/usr/bin/env bash
-
-[[ -f "$HOME/.gridpane" ]] || { echo "Missing $HOME/.gridpane"; exit 1; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/gp-inc.sh"
+[[ -f "$HOME/.gridpane" ]] || { _error "Missing $HOME/.gridpane"; exit 1; }
 source $HOME/.gridpane
+[[ -z $DATA_DIR ]] && { DATA_DIR="$SCRIPT_DIR/data"; }
 
+# =======================================
 # -- Variables
+# =======================================
 GP_API_URL="https://my.gridpane.com/oauth/api/v1"
 RANDOM_NUM=$((RANDOM % 1000))
-REPORT_FILE="/tmp/gp-api-report-$RANDOM_NUM.json"
+REPORT_FILE="$DATA_DIR/$RANDOM_NUM.json"
 
-# -- Functions
+# =======================================
+# -- Usage
+# =======================================
 function usage() {
-    echo "Usage: $0 <command>"
+    echo "Usage: $0 -c <command> <action> [options]"
+    echo
     echo "Commands:"
-    echo "  gp-servers-old"
-    echo "  gp-servers"
-}
-# Cyan debug
-_debugf() {
-    if [[ $DEBUGF == "1" ]]; then
-        echo -e "\e[1;36m$@\e[0m"
-    fi
-}
-
-_debug_file () {
-    if [[ $DEBUGF == "1" ]]; then
-        echo "$@" >> debug.log
-    fi
-}
-_error() {
-    echo -e "\e[1;31m$1\e[0m"
+    echo "  api <endpoint>       - Run an API endpoint (GET only)"
+    echo "  gp-servers-old       - Fetch servers using old method"
+    echo "  gp-servers           - Fetch servers with page support and json combine"
+    echo
+    echo "Options:"
+    echo "  -h, --help          - Show this help message"
+    echo "  -d, --debug         - Enable debug mode"
 }
 
+# ======================================
 # -- gp_api $METOD $ENDPOINT
+# ======================================
 function gp_api () {
     local METHOD=$1
     local ENDPOINT=$2
     local EXTRA=$3
     local CURL_HEADERS=()
     local CURL_OUTPUT
-    
+
     [[ $DEBUGF == "1" ]] && set -x
     CURL_HEADERS+=(-H "Authorization: Bearer $GP_TOKEN")
-    CURL_OUTPUT=$(mktemp)    
+    CURL_OUTPUT=$(mktemp)
     CURL_HTTP_CODE="$(curl -s \
     --output "$CURL_OUTPUT" \
     -w "%{http_code}\n" \
@@ -60,7 +59,9 @@ function gp_api () {
     return 0
 }
 
+# ======================================
 # -- gp_api_servers_old
+# ======================================
 function gp_api_servers_old () {
     CMD="/server"
     gp_api GET "$CMD" | jq -r '.data[]' >> "$REPORT_FILE"
@@ -68,7 +69,7 @@ function gp_api_servers_old () {
     LAST_PAGE=$(echo "$API_OUTPUT" | jq -r '.meta.last_page')
     FIRST_PAGE=$(echo "$API_OUTPUT" | jq -r '.meta.current_page')
     MAX_PAGE="2"
-    while [[ $LAST_PAGE != $FIRST_PAGE ]]; do        
+    while [[ $LAST_PAGE != $FIRST_PAGE ]]; do
         FIRST_PAGE=$((FIRST_PAGE + 1))
         echo "Fetching page $FIRST_PAGE of $LAST_PAGE"
         gp_api GET "$CMD?page=$FIRST_PAGE" #"--data { \"summary\" true }"
@@ -113,20 +114,52 @@ function gp_api_servers () {
     #rm page*.json
 }
 
-CMD="$1"
-[[ -z "$CMD" ]] && { echo "Usage: $0 <command>"; exit 1; }
+# =============================================================================
+# -- Main
+# =============================================================================
+# -- Process Arguments
+    POSITIONAL=()
+    while [[ $# -gt 0 ]]; do
+    key="$1"
+    case $key in
+        -c|--command)
+        CMD="$2"
+        shift 2
+        [[ -n $1 ]] && { CMD_ACTION="$1"; shift ; }
+        ;;
+        -d|--debug)
+        DEBUG="1"
+        shift # past argument
+        ;;
+        -h|--help)
+        usage
+        ;;
+        *)    # unknown option
+        POSITIONAL+=("$1") # save it in an array for later
+        shift # past argument
+        ;;
+    esac
+    done
+    set -- "${POSITIONAL[@]}" # restore positional parameters
+
+# -- API
 if [[ $CMD == "api" ]]; then
-    CMD_ACTION="$2"
     [[ -z "$CMD_ACTION" ]] && { echo "Usage: $0 api <action>"; exit 1; }
     gp_api GET "$CMD_ACTION"
     _debugf "API Output: $API_OUTPUT"
     echo "$API_OUTPUT" | jq -r '.'
+# -- gp-servers-old
 elif [[ $CMD == "gp-servers-old" ]]; then
     gp_api_servers_old
+# -- gp-servers
 elif [[ $CMD == "gp-servers" ]]; then
     gp_api_servers
+elif [[ $CMD == "" ]]; then
+    usage
+    _error "No command provided"
+    exit 1
 else
     usage
-    echo "Unknown command: $CMD" 
+    _error "Unknown command: $CMD"
     exit 1
 fi
