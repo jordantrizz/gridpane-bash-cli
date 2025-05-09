@@ -1,0 +1,4 @@
+.venv
+debug.log
+tmp
+test.json
