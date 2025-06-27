@@ -280,7 +280,8 @@ function _gp_api_list_servers () {
         _loading3 "Total ${ENDPOINT_NAME} found: $TOTAL_DOMAINS"
         return 0
     else
-        _debugf "Cache not found or disabled, run get-sites first"
+        _error "Cache not found or disabled, run get-sites first"
+        return 1
     fi
 }
 
@@ -375,7 +376,8 @@ function _gp_api_get_urls () {
         _loading3 "Total domains found: $TOTAL_DOMAINS"
         return 0
     else
-        _debugf "Cache not found or disabled, run get-sites first"
+        _error "Cache not found or disabled, run get-sites first"
+        return 1
     fi
 }
 
@@ -399,7 +401,8 @@ function _gp_api_get_site () {
         jq --arg domain "$DOMAIN" '.[] | select(.url == $domain)' "$CACHE_FILE"
         return 0
     else
-        _debugf "Cache not found or disabled, run get-sites first"
+        _error "Cache not found or disabled, run get-sites first"
+        return 1
     fi
 }
 
