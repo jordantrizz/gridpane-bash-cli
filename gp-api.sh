@@ -24,25 +24,31 @@ function _usage() {
     echo "Commands:"
     echo
     echo "  API:"
-    echo "      api <endpoint>          - Run an API endpoint (GET only)"
-    echo "      test-token              - Test the API token"
+    echo "      api <endpoint>              - Run an API endpoint (GET only)"
+    echo "      test-token                  - Test the API token"
     echo
     echo "  Servers:"
-    echo "      get-servers             - Fetch servers with page support and json combine"
-    echo "      list-servers            - List servers with basic details"
-    echo "      list-servers-details    - List servers with details"
-    echo "      list-servers-sites      - List servers with sites"
+    echo "      get-servers                 - Fetch servers with page support and json combine"
+    echo "      list-servers                - List servers"
+    echo "      list-servers-details        - List servers with details"
+    echo "      list-servers-sites          - List servers with sites"
     echo
     echo "  Sites:"
-    echo "      get-sites               - Fetch sites from the API into cache"
-    echo "      list-urls               - Fetch all URL's from the API"
-    echo "      get-site <domain>       - Fetch a specific site by domain"
+    echo "      list-sites                  - Fetch sites from the API into cache"
+    echo "      list-sites-csv              - Fetch sites from the API and output as CSV"
+    echo "      get-site <domain>           - Fetch a specific site by domain"
+    echo
+    echo " Cache"
+    echo "      get-cache-age <endpoint>    - Get the age of the cache"
+    echo "      cache-sites                 - Cache sites from the API"
+    echo "      cache-servers               - Cache servers from the API"
+    echo "      clear-cache                 - Clear the cache"
     echo
     echo "Options:"
-    echo "  -h, --help                  - Show this help message"
-    echo "  -nc,                        - No cache"
-    echo "  -d, --debug                 - Enable debug mode"
-    echo "  -dapi, --debug-api          - Enable API debug mode"
+    echo "  -h, --help                      - Show this help message"
+    echo "  -nc,                            - No cache"
+    echo "  -d, --debug                     - Enable debug mode"
+    echo "  -dapi, --debug-api              - Enable API debug mode"
 }
 
 
@@ -88,7 +94,9 @@ set -- "${POSITIONAL[@]}" # restore positional parameters
 _loading "Loading GridPane Bash CLI - $VERSION"
 _pre_flight
 
+# =============================================
 # -- API
+# =============================================
 if [[ $CMD == "api" ]]; then
     [[ -z "$CMD_ACTION" ]] && { echo "Usage: $0 api <action>"; exit 1; }
     gp_api GET "$CMD_ACTION"
@@ -98,9 +106,9 @@ if [[ $CMD == "api" ]]; then
 elif [[ $CMD == "test-token" ]]; then
     _gp_test_token
 # -- gp-servers
-elif [[ $CMD == "get-servers" ]]; then
-    _gp_api_servers
-# -- list-servers
+# =============================================
+# -- Servers Commands
+# =============================================
 elif [[ $CMD == "list-servers" ]]; then
     _gp_api_list_servers 0
 # -- list-servers-details
@@ -109,11 +117,14 @@ elif [[ $CMD == "list-servers-details" ]]; then
 # -- list-servers-sites
 elif [[ $CMD == "list-servers-sites" ]]; then
     _gp_api_list_servers_sites
-elif [[ $CMD == "get-sites" ]]; then
-    _gp_api_get_sites
+# ============================================
+# -- Sites Commands
+# ============================================
+elif [[ $CMD == "list-sites" ]]; then
+    _gp_api_list_sites
 # -- get-domains
-elif [[ $CMD == "get-urls" ]]; then
-    _gp_api_get_urls
+elif [[ $CMD == "list-sites-csv" ]]; then
+    _gp_api_list_sites 1
 # -- get-site
 elif [[ $CMD == "get-site" ]]; then
     if [[ -z "$CMD_ACTION" ]]; then
@@ -122,6 +133,22 @@ elif [[ $CMD == "get-site" ]]; then
         exit 1
     fi
     _gp_api_get_site $CMD_ACTION
+# ============================================
+# -- Cache Commands
+# ============================================
+elif [[ $CMD == "get-cache-age" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "Not completed"
+        exit 1
+    fi
+    _gp_api_cache_age "$CMD_ACTION"
+elif [[ $CMD == "cache-sites" ]]; then
+    _gp_api_cache_sites
+elif [[ $CMD == "cache-servers" ]]; then
+    _gp_api_cache_servers
+elif [[ $CMD == "clear-cache" ]]; then
+    _gp_api_clear_cache
 elif [[ $CMD == "" ]]; then
     _usage
     _error "No command provided"
