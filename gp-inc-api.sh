@@ -239,6 +239,7 @@ function _gp_api_cache_servers () {
         TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq 'length')
         _debugf "Total servers in cache: $TOTAL_ITEMS"
         # -- Cache the API output
+        return 0
     else
         _error "No API output to cache"
         return 1
@@ -355,7 +356,23 @@ function _gp_api_list_servers () {
         _loading3 "Total ${ENDPOINT_NAME} found: $TOTAL_DOMAINS"
         return 0
     else
-        _error "Cache not found or disabled, run get-sites first"
+        # Cache not found - prompt user to run get-sites
+        _handle_cache_not_found
+        if [[ $? -eq 0 ]]; then
+            # Cache was populated, retry the operation
+            _gp_api_cache_age "$CACHE_FILE"
+            if [[ $? -eq 0 ]]; then
+                if [[ $EXTENDED == "1" ]]; then
+                    DOMAINS=$(jq -r '.[] | "\(.id),\(.label),\(.ip),\(.database),\(.webserver),\(.os_version)"' "$CACHE_FILE")
+                else
+                    DOMAINS=$(jq -r '.[] | .label' "$CACHE_FILE" | sort -u)
+                fi
+                echo "$DOMAINS"
+                TOTAL_DOMAINS=$(echo "$DOMAINS" | wc -l)
+                _loading3 "Total ${ENDPOINT_NAME} found: $TOTAL_DOMAINS"
+                return 0
+            fi
+        fi
         return 1
     fi
 }
@@ -509,7 +526,19 @@ function _gp_api_get_urls () {
         _loading3 "Total domains found: $TOTAL_DOMAINS"
         return 0
     else
-        _error "Cache not found or disabled, run get-sites first"
+        # Cache not found - prompt user to run get-sites
+        _handle_cache_not_found
+        if [[ $? -eq 0 ]]; then
+            # Cache was populated, retry the operation
+            _gp_api_cache_age "$CACHE_FILE"
+            if [[ $? -eq 0 ]]; then
+                DOMAINS=$(jq -r '.[] | .url' "$CACHE_FILE" | sort -u)
+                echo "$DOMAINS"
+                TOTAL_DOMAINS=$(echo "$DOMAINS" | wc -l)
+                _loading3 "Total domains found: $TOTAL_DOMAINS"
+                return 0
+            fi
+        fi
         return 1
     fi
 }
@@ -535,9 +564,126 @@ function _gp_api_get_site () {
         jq --arg domain "$DOMAIN" '.[] | select(.url == $domain)' "$CACHE_FILE"
         return 0
     else
-        _error "Cache not found or disabled, run get-sites first"
+        # Cache not found - prompt user to run get-sites
+        _handle_cache_not_found
+        if [[ $? -eq 0 ]]; then
+            # Cache was populated, retry the operation
+            _gp_api_cache_age "$CACHE_FILE"
+            if [[ $? -eq 0 ]]; then
+                jq --arg domain "$DOMAIN" '.[] | select(.url == $domain)' "$CACHE_FILE"
+                return 0
+            fi
+        fi
         return 1
     fi
 }
 
+# =====================================
+# -- _gp_api_get_site_formatted $DOMAIN
+# -- Get site in formatted output
+# ======================================
+function _gp_api_get_site_formatted () {    
+    local DOMAIN="$1"
+    _gp_select_token
+    local SITE_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    local SERVER_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
+    
+    if [[ -z "$DOMAIN" ]]; then
+        _error "Error: Domain is required"
+        return 1
+    fi
+
+    # Check if both caches exist and are fresh
+    _loading2 "Checking site cache at $SITE_CACHE_FILE"
+    _gp_api_cache_age "$SITE_CACHE_FILE"
+    local site_cache_status=$?
+    
+    # Handle missing caches
+    if [[ $site_cache_status -ne 0 ]]; then
+        _warning "Site cache not found or expired."
+        echo
+        read -p "Would you like to run 'cache-sites' to populate the site cache? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            _loading "Running cache-sites to populate cache..."
+            _gp_api_cache_sites
+            if [[ $? -eq 0 ]]; then
+                _success "Site cache populated successfully."
+                _gp_api_cache_age "$SITE_CACHE_FILE"
+                site_cache_status=$?
+            else
+                _error "Failed to populate site cache. Please run 'cache-sites' manually."
+                return 1
+            fi
+        else
+            _error "Site cache is required. Please run 'cache-sites' first."
+            return 1
+        fi
+    else
+        _success "Site cache is fresh."
+    fi
+    
+    _loading2 "Checking server cache at $SERVER_CACHE_FILE"
+    _gp_api_cache_age "$SERVER_CACHE_FILE"
+    local server_cache_status=$?
+    if [[ $server_cache_status -ne 0 ]]; then
+        _warning "Server cache not found or expired."
+        echo
+        read -p "Would you like to run 'cache-servers' to populate the server cache? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            _loading "Running cache-servers to populate cache..."
+            _gp_api_cache_servers
+            if [[ $? -eq 0 ]]; then
+                _success "Server cache populated successfully."
+                _gp_api_cache_age "$SERVER_CACHE_FILE"
+                server_cache_status=$?
+            else
+                _error "Failed to populate server cache. Please run 'cache-servers' manually."
+                return 1
+            fi
+        else
+            _error "Server cache is required. Please run 'cache-servers' first."
+            return 1
+        fi
+    else
+        _success "Server cache is fresh."
+    fi
+    
+    # Get site data
+    _debugf "Getting site data for domain: $DOMAIN"
+    local site_data=$(jq --arg domain "$DOMAIN" '.[] | select(.url == $domain)' "$SITE_CACHE_FILE")
+    
+    if [[ -z "$site_data" || "$site_data" == "null" ]]; then
+        _error "Site not found: $DOMAIN"
+        return 1
+    fi
+    
+    # Extract site fields
+    local id=$(echo "$site_data" | jq -r '.id // "N/A"')
+    local url=$(echo "$site_data" | jq -r '.url // "N/A"')
+    local ssl_status=$(echo "$site_data" | jq -r '.ssl_status // "N/A"')
+    local server_id=$(echo "$site_data" | jq -r '.server_id // "N/A"')
+    local user_id=$(echo "$site_data" | jq -r '.user_id // "N/A"')
+    local system_userid=$(echo "$site_data" | jq -r '.system_userid // "N/A"')
+    local nginx_caching=$(echo "$site_data" | jq -r '.nginx_caching // "N/A"')
+    
+    # Get server name from server cache
+    local servername="N/A"
+    if [[ "$server_id" != "N/A" && "$server_id" != "null" ]]; then
+        servername=$(jq --arg server_id "$server_id" '.[] | select(.id == ($server_id | tonumber)) | .label // "N/A"' "$SERVER_CACHE_FILE")
+        # Remove quotes if present
+        servername=$(echo "$servername" | tr -d '"')
+    fi
+    
+    # Output formatted table
+    printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
+        "ID" "URL" "SSL Status" "Server ID" "Server Name" "User ID" "System UID" "Nginx Cache"
+    printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
+        "--------" "----------------------------------------" "------------" "----------" "--------------------" "--------" "------------" "---------------"
+    printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
+        "$id" "$url" "$ssl_status" "$server_id" "$servername" "$user_id" "$system_userid" "$nginx_caching"
+    
+    return 0
+}
 

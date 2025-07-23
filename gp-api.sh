@@ -36,7 +36,8 @@ function _usage() {
     echo "  Sites:"
     echo "      list-sites                  - Fetch sites from the API into cache"
     echo "      list-sites-csv              - Fetch sites from the API and output as CSV"
-    echo "      get-site <domain>           - Fetch a specific site by domain"
+    echo "      get-site <domain>           - Get site details in formatted table output"
+    echo "      get-site-json <domain>      - Fetch details of a specific site by domain (JSON)"
     echo
     echo " Cache"
     echo "      get-cache-age <endpoint>    - Get the age of the cache"
@@ -125,11 +126,19 @@ elif [[ $CMD == "list-sites" ]]; then
 # -- get-domains
 elif [[ $CMD == "list-sites-csv" ]]; then
     _gp_api_list_sites 1
-# -- get-site
+# -- get-site (formatted output)
 elif [[ $CMD == "get-site" ]]; then
     if [[ -z "$CMD_ACTION" ]]; then
         _usage
         _error "No domain provided for get-site command"
+        exit 1
+    fi
+    _gp_api_get_site_formatted $CMD_ACTION
+# -- get-site-json (raw JSON output)
+elif [[ $CMD == "get-site-json" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "No domain provided for get-site-json command"
         exit 1
     fi
     _gp_api_get_site $CMD_ACTION

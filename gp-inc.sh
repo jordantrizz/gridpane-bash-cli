@@ -9,6 +9,7 @@ echo "Loaded gp-inc.sh"
 _debugf() { [[ $DEBUG == "1" ]] && echo -e "\e[1;36m*DEBUG* ${@}\e[0m"; }
 _debug_file () { [[ $DEBUG == "1" ]] && echo "$@" >> debug.log; }
 _error() { echo -e "\e[1;31m$1\e[0m"; }
+_warning() { echo -e "\e[1;33m⚠️  Warning: $1\e[0m"; }
 _success () { echo -e "\e[1;32m$1\e[0m"; }
 # -- Bright yellow background black text
 _loading () { echo -e "\e[1;33m\e[7m$1\e[0m"; }
@@ -16,6 +17,32 @@ _loading () { echo -e "\e[1;33m\e[7m$1\e[0m"; }
 _loading2 () { echo -e "\e[1;34m\e[7m$1\e[0m"; }
 # -- Dark grey text
 _loading3 () { echo -e "\e[1;30m$1\e[0m"; }
+
+# =====================================
+# -- Cache Helper Functions
+# =====================================
+# Function to handle cache not found with prompt to run get-sites
+_handle_cache_not_found() {
+    _warning "Cache not found or disabled."
+    echo
+    read -p "Would you like to run 'get-sites' to populate the cache? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        _loading "Running get-sites to populate cache..."
+        _gp_api_get_sites
+        local get_sites_result=$?
+        if [[ $get_sites_result -eq 0 ]]; then
+            _success "Cache populated successfully. Retrying your request..."
+            return 0
+        else
+            _error "Failed to populate cache. Please run 'get-sites' manually."
+            return 1
+        fi
+    else
+        _error "Cache is required. Please run 'get-sites' first to populate the cache."
+        return 1
+    fi
+}
 
 # =====================================
 # -- _pre_flight
