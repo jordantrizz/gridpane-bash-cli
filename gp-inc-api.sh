@@ -650,39 +650,62 @@ function _gp_api_get_site_formatted () {
         _success "Server cache is fresh."
     fi
     
-    # Get site data
+    # Get site data - handle multiple sites with same URL
     _debugf "Getting site data for domain: $DOMAIN"
-    local site_data=$(jq --arg domain "$DOMAIN" '.[] | select(.url == $domain)' "$SITE_CACHE_FILE")
+    local sites_data
+    sites_data=$(jq --arg domain "$DOMAIN" '[.[] | select(.url == $domain)]' "$SITE_CACHE_FILE" 2>/dev/null)
     
-    if [[ -z "$site_data" || "$site_data" == "null" ]]; then
+    if [[ -z "$sites_data" || "$sites_data" == "null" || "$sites_data" == "[]" ]]; then
         _error "Site not found: $DOMAIN"
         return 1
     fi
     
-    # Extract site fields
-    local id=$(echo "$site_data" | jq -r '.id // "N/A"')
-    local url=$(echo "$site_data" | jq -r '.url // "N/A"')
-    local ssl_status=$(echo "$site_data" | jq -r '.ssl_status // "N/A"')
-    local server_id=$(echo "$site_data" | jq -r '.server_id // "N/A"')
-    local user_id=$(echo "$site_data" | jq -r '.user_id // "N/A"')
-    local system_userid=$(echo "$site_data" | jq -r '.system_userid // "N/A"')
-    local nginx_caching=$(echo "$site_data" | jq -r '.nginx_caching // "N/A"')
+    local sites_count
+    sites_count=$(echo "$sites_data" | jq 'length' 2>/dev/null)
     
-    # Get server name from server cache
-    local servername="N/A"
-    if [[ "$server_id" != "N/A" && "$server_id" != "null" ]]; then
-        servername=$(jq --arg server_id "$server_id" '.[] | select(.id == ($server_id | tonumber)) | .label // "N/A"' "$SERVER_CACHE_FILE")
-        # Remove quotes if present
-        servername=$(echo "$servername" | tr -d '"')
+    if [[ "$sites_count" -eq 0 ]]; then
+        _error "Site not found: $DOMAIN"
+        return 1
     fi
     
-    # Output formatted table
+    # Output formatted table header
     printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
         "ID" "URL" "SSL Status" "Server ID" "Server Name" "User ID" "System UID" "Nginx Cache"
     printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
         "--------" "----------------------------------------" "------------" "----------" "--------------------" "--------" "------------" "---------------"
-    printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
-        "$id" "$url" "$ssl_status" "$server_id" "$servername" "$user_id" "$system_userid" "$nginx_caching"
+    
+    # Process each site instance
+    for ((i=0; i<sites_count; i++)); do
+        local site_data
+        site_data=$(echo "$sites_data" | jq ".[$i]" 2>/dev/null)
+        
+        # Extract site fields for this instance
+        local id url ssl_status server_id user_id system_userid nginx_caching
+        
+        id=$(echo "$site_data" | jq -r '.id // "N/A"' 2>/dev/null)
+        url=$(echo "$site_data" | jq -r '.url // "N/A"' 2>/dev/null)
+        ssl_status=$(echo "$site_data" | jq -r '.ssl_status // "N/A"' 2>/dev/null)
+        server_id=$(echo "$site_data" | jq -r '.server_id // "N/A"' 2>/dev/null)
+        user_id=$(echo "$site_data" | jq -r '.user_id // "N/A"' 2>/dev/null)
+        system_userid=$(echo "$site_data" | jq -r '.system_userid // "N/A"' 2>/dev/null)
+        nginx_caching=$(echo "$site_data" | jq -r '.nginx_caching // "N/A"' 2>/dev/null)
+        
+        # Get server name from server cache for this instance
+        local servername="N/A"
+        if [[ "$server_id" != "N/A" && "$server_id" != "null" && -n "$server_id" ]]; then
+            servername=$(jq --arg server_id "$server_id" '.[] | select(.id == ($server_id | tonumber)) | .label // "N/A"' "$SERVER_CACHE_FILE" 2>/dev/null | head -n1)
+            # Remove quotes if present and handle empty results
+            if [[ -n "$servername" && "$servername" != "null" ]]; then
+                servername=$(echo "$servername" | tr -d '"')
+            else
+                servername="N/A"
+            fi
+        fi
+        
+        # Output this site's data
+        printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
+            "$id" "$url" "$ssl_status" "$server_id" "$servername" "$user_id" "$system_userid" "$nginx_caching"
+    done
     
     return 0
 }
