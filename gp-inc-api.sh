@@ -579,6 +579,78 @@ function _gp_api_get_site () {
 }
 
 # =====================================
+# -- _gp_api_list_servers_csv
+# -- List servers from GridPane API in CSV format (serverid,servername)
+# ======================================
+function _gp_api_list_servers_csv () {
+    _debugf "${FUNCNAME[0]} called"
+    local ENDPOINT="/server"
+    local ENDPOINT_NAME
+    ENDPOINT_NAME=$(echo "$ENDPOINT" | tr -d '/')
+    _gp_select_token
+    CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_${ENDPOINT_NAME}.json"
+
+    # Check cache first
+    _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
+    _gp_api_cache_age "$CACHE_FILE"
+    if [[ $? -eq 0 ]]; then
+        _debugf "Cache is fresh, using cached ${ENDPOINT_NAME} data"
+        # Use jq to filter server id and label from the cached file
+        _debugf "Filtering ${ENDPOINT_NAME} from cache file: $CACHE_FILE"
+        
+        # Output CSV header
+        echo "serverid,servername"
+        
+        # Output CSV data with server ID and server name, sorted alphabetically by server name
+        jq -r '.[] | "\(.id),\(.label)"' "$CACHE_FILE" | sort -t',' -k2,2
+        
+        # Total count
+        TOTAL_SERVERS=$(jq 'length' "$CACHE_FILE")
+        _loading3 "Total ${ENDPOINT_NAME} found: $TOTAL_SERVERS"
+        return 0
+    else
+        _error "Cache not found or disabled, run cache-servers first"
+        return 1
+    fi
+}
+
+# =====================================
+# -- _gp_api_list_servers_csv
+# -- List servers from GridPane API in CSV format (serverid,servername)
+# ======================================
+function _gp_api_list_servers_csv () {
+    _debugf "${FUNCNAME[0]} called"
+    local ENDPOINT="/server"
+    local ENDPOINT_NAME
+    ENDPOINT_NAME=$(echo "$ENDPOINT" | tr -d '/')
+    _gp_select_token
+    CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_${ENDPOINT_NAME}.json"
+
+    # Check cache first
+    _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
+    _gp_api_cache_age "$CACHE_FILE"
+    if [[ $? -eq 0 ]]; then
+        _debugf "Cache is fresh, using cached ${ENDPOINT_NAME} data"
+        # Use jq to filter server id and label from the cached file
+        _debugf "Filtering ${ENDPOINT_NAME} from cache file: $CACHE_FILE"
+        
+        # Output CSV header
+        echo "serverid,servername"
+        
+        # Output CSV data with server ID and server name, sorted alphabetically by server name
+        jq -r '.[] | "\(.id),\(.label)"' "$CACHE_FILE" | sort -t',' -k2,2
+        
+        # Total count
+        TOTAL_SERVERS=$(jq 'length' "$CACHE_FILE")
+        _loading3 "Total ${ENDPOINT_NAME} found: $TOTAL_SERVERS"
+        return 0
+    else
+        _error "Cache not found or disabled, run cache-servers first"
+        return 1
+    fi
+}
+
+# =====================================
 # -- _gp_api_get_site_formatted $DOMAIN
 # -- Get site in formatted output
 # ======================================

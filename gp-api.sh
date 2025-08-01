@@ -31,6 +31,7 @@ function _usage() {
     echo "      get-servers                 - Fetch servers with page support and json combine"
     echo "      list-servers                - List servers"
     echo "      list-servers-details        - List servers with details"
+    echo "      list-servers-csv            - List servers as CSV (serverid,servername)"
     echo "      list-servers-sites          - List servers with sites"
     echo
     echo "  Sites:"
@@ -115,6 +116,9 @@ elif [[ $CMD == "list-servers" ]]; then
 # -- list-servers-details
 elif [[ $CMD == "list-servers-details" ]]; then
     _gp_api_list_servers 1
+# -- list-servers-csv
+elif [[ $CMD == "list-servers-csv" ]]; then
+    _gp_api_list_servers_csv
 # -- list-servers-sites
 elif [[ $CMD == "list-servers-sites" ]]; then
     _gp_api_list_servers_sites
