@@ -21,25 +21,43 @@ _loading3 () { echo -e "\e[1;30m$1\e[0m"; }
 # =====================================
 # -- Cache Helper Functions
 # =====================================
-# Function to handle cache not found with prompt to run get-sites
+# Function to handle cache not found with prompt to run appropriate cache command
 _handle_cache_not_found() {
-    _warning "Cache not found or disabled."
+    local cache_type="${1:-sites}"  # Default to sites for backward compatibility
+    local cache_function="cache-${cache_type}"
+    local get_function="_gp_api_get_${cache_type}"
+    
+    _warning "Cache not found or disabled for ${cache_type}."
     echo
-    read -p "Would you like to run 'get-sites' to populate the cache? (y/N): " -n 1 -r
+    read -p "Would you like to run '${cache_function}' to populate the cache? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        _loading "Running get-sites to populate cache..."
-        _gp_api_get_sites
-        local get_sites_result=$?
-        if [[ $get_sites_result -eq 0 ]]; then
+        _loading "Running ${cache_function} to populate cache..."
+        
+        # Call the appropriate get function
+        case "$cache_type" in
+            "sites")
+                _gp_api_get_sites
+                ;;
+            "servers")
+                _gp_api_get_servers
+                ;;
+            *)
+                _error "Unknown cache type: ${cache_type}"
+                return 1
+                ;;
+        esac
+        
+        local get_result=$?
+        if [[ $get_result -eq 0 ]]; then
             _success "Cache populated successfully. Retrying your request..."
             return 0
         else
-            _error "Failed to populate cache. Please run 'get-sites' manually."
+            _error "Failed to populate cache. Please run '${cache_function}' manually."
             return 1
         fi
     else
-        _error "Cache is required. Please run 'get-sites' first to populate the cache."
+        _error "Cache is required. Please run '${cache_function}' first to populate the cache."
         return 1
     fi
 }
