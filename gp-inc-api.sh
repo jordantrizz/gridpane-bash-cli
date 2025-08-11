@@ -631,46 +631,28 @@ function _gp_api_get_site_formatted () {
     local DOMAIN="$1"
     _gp_select_token
     local SITE_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    local SERVER_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
     
     if [[ -z "$DOMAIN" ]]; then
         _error "Error: Domain is required"
         return 1
     fi
 
-    # Check if both caches exist and are fresh
+    # Check if site cache exists and get user preference on age
     _loading2 "Checking site cache at $SITE_CACHE_FILE"
-    _gp_api_cache_age "$SITE_CACHE_FILE"
+    _check_cache_with_options "$SITE_CACHE_FILE" "sites"
     local site_cache_status=$?
     
-    # Handle missing caches
     if [[ $site_cache_status -ne 0 ]]; then
-        _warning "Site cache not found or expired."
-        echo
-        read -p "Would you like to run 'cache-sites' to populate the site cache? (y/N): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            _loading "Running cache-sites to populate cache..."
-            _gp_api_cache_sites
-            if [[ $? -eq 0 ]]; then
-                _success "Site cache populated successfully."
-                _gp_api_cache_age "$SITE_CACHE_FILE"
-                site_cache_status=$?
-            else
-                _error "Failed to populate site cache. Please run 'cache-sites' manually."
-                return 1
-            fi
-        else
-            _error "Site cache is required. Please run 'cache-sites' first."
-            return 1
-        fi
-    else
-        _success "Site cache is fresh."
+        _error "Unable to proceed without site cache."
+        return 1
     fi
         
     # Get site data - handle multiple sites with same URL
     _debugf "Getting site data for domain: $DOMAIN"
     local sites_data
     sites_data=$(jq --arg domain "$DOMAIN" '[.[] | select(.url == $domain)]' "$SITE_CACHE_FILE" 2>/dev/null)
+    _debugf "Sites data for domain $DOMAIN: $sites_data"
     
     if [[ -z "$sites_data" || "$sites_data" == "null" || "$sites_data" == "[]" ]]; then
         _error "Site not found: $DOMAIN"
@@ -687,21 +669,23 @@ function _gp_api_get_site_formatted () {
     
     # Output formatted table header
     printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
-        "ID" "URL" "SSL Status" "Server ID" "Server Name" "User ID" "System UID" "Nginx Cache"
+        "ID" "URL" "SSL" "SSL Status" "Server ID" "Server Name" "User ID" "System UID" "Nginx Cache"
     printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
-        "--------" "----------------------------------------" "------------" "----------" "--------------------" "--------" "------------" "---------------"
+        "--------" "----------------------------------------" "------------"  "----------" "--------------------" "--------" "------------" "---------------"
     
     # Process each site instance
     for ((i=0; i<sites_count; i++)); do
         local site_data
         site_data=$(echo "$sites_data" | jq ".[$i]" 2>/dev/null)
+        _debugf "Processing site data for instance $i: $site_data"
         
         # Extract site fields for this instance
         local id url ssl_status server_id user_id system_userid nginx_caching
         
         id=$(echo "$site_data" | jq -r '.id // "N/A"' 2>/dev/null)
         url=$(echo "$site_data" | jq -r '.url // "N/A"' 2>/dev/null)
-        ssl_status=$(echo "$site_data" | jq -r '.ssl_status // "N/A"' 2>/dev/null)
+        is_ssl=$(echo "$site_data" | jq -r '.is_ssl' 2>/dev/null)
+        ssl_status=$(echo "$site_data" | jq -r '.ssl_status' 2>/dev/null)
         server_id=$(echo "$site_data" | jq -r '.server_id // "N/A"' 2>/dev/null)
         user_id=$(echo "$site_data" | jq -r '.user_id // "N/A"' 2>/dev/null)
         system_userid=$(echo "$site_data" | jq -r '.system_userid // "N/A"' 2>/dev/null)
@@ -720,8 +704,8 @@ function _gp_api_get_site_formatted () {
         fi
         
         # Output this site's data
-        printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
-            "$id" "$url" "$ssl_status" "$server_id" "$servername" "$user_id" "$system_userid" "$nginx_caching"
+        printf "%-8s %-40s %-12s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
+            "$id" "$url" "$is_ssl" "$ssl_status" "$server_id" "$servername" "$user_id" "$system_userid" "$nginx_caching"
     done
     
     return 0
