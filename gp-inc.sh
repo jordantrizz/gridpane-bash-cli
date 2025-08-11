@@ -64,7 +64,21 @@ _check_cache_with_options() {
                     return 1
                     ;;
             esac
-            return $?
+            
+            local cache_result=$?
+            if [[ $cache_result -eq 0 ]]; then
+                # Verify the cache file was actually created
+                if [[ -f "$cache_file" ]]; then
+                    _success "Cache populated successfully."
+                    return 0
+                else
+                    _error "Cache function succeeded but cache file was not created: $cache_file"
+                    return 1
+                fi
+            else
+                _error "Failed to populate cache (exit code: $cache_result)"
+                return 1
+            fi
         else
             _error "Cache is required. Please run '${cache_function}' first to populate the cache."
             return 1
@@ -105,7 +119,21 @@ _check_cache_with_options() {
                 return 1
                 ;;
         esac
-        return $?
+        
+        local cache_result=$?
+        if [[ $cache_result -eq 0 ]]; then
+            # Verify the cache file was actually created/updated
+            if [[ -f "$cache_file" ]]; then
+                _success "Cache refreshed successfully."
+                return 0
+            else
+                _error "Cache function succeeded but cache file was not created: $cache_file"
+                return 1
+            fi
+        else
+            _error "Failed to refresh cache (exit code: $cache_result)"
+            return 1
+        fi
     else
         _loading3 "Using existing cache (${age_formatted} old)."
         return 0
@@ -231,9 +259,14 @@ function _gp_select_token () {
         fi
     done
 
-    # Check if GPBC_TOKEN is set
-    if [[ -z $GPBC_TOKEN ]]; then
-        _error "Error: GPBC_TOKEN is not set"
+    # Check if GPBC_TOKEN is set and not empty
+    if [[ -z "${GPBC_TOKEN+x}" ]]; then
+        _error "Error: GPBC_TOKEN variable is not defined"
+        _error "Please check your .gridpane file and ensure the selected token profile exists"
+        exit 1
+    elif [[ -z "$GPBC_TOKEN" ]]; then
+        _error "Error: GPBC_TOKEN is defined but empty"
+        _error "Please check your .gridpane file and ensure the token value is not blank"
         exit 1
     fi
     _debugf "GPBC_TOKEN is set to: $GPBC_TOKEN"

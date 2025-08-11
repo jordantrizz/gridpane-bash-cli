@@ -211,12 +211,21 @@ function _gp_api_cache_sites () {
     _debugf "${FUNCNAME[0]} called"
     _gp_select_token
     _gp_api_get_sites
+    local get_sites_result=$?
+    
+    # Check if _gp_api_get_sites was successful
+    if [[ $get_sites_result -ne 0 ]]; then
+        _error "Failed to fetch sites from API"
+        return 1
+    fi
+    
     # -- Count how many sites are in cache
     if [[ -n "$API_OUTPUT" ]]; then
         _debugf "Counting sites in cache via \$API_OUTPUT"
         TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq 'length')
         _debugf "Total sites in cache: $TOTAL_ITEMS"
-        # -- Cache the API output
+        _success "Successfully cached $TOTAL_ITEMS sites"
+        return 0
     else
         _error "No API output to cache"
         return 1
@@ -233,12 +242,20 @@ function _gp_api_cache_servers () {
     _debugf "${FUNCNAME[0]} called"
     _gp_select_token
     _gp_api_get_servers
-    # -- Count how many sites are in cache
+    local get_servers_result=$?
+    
+    # Check if _gp_api_get_servers was successful
+    if [[ $get_servers_result -ne 0 ]]; then
+        _error "Failed to fetch servers from API"
+        return 1
+    fi
+    
+    # -- Count how many servers are in cache
     if [[ -n "$API_OUTPUT" ]]; then
         _debugf "Counting servers in cache via \$API_OUTPUT"
         TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq 'length')
         _debugf "Total servers in cache: $TOTAL_ITEMS"
-        # -- Cache the API output
+        _success "Successfully cached $TOTAL_ITEMS servers"
         return 0
     else
         _error "No API output to cache"
@@ -481,11 +498,13 @@ function _gp_api_list_sites () {
     _gp_select_token
     CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_${ENDPOINT_NAME}.json"
 
-    # Check cache first
+    # Check cache with user options for age and missing cache
     _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
-    _gp_api_cache_age "$CACHE_FILE"
-    if [[ $? -eq 0 ]]; then
-        _debugf "Cache is fresh, using cached ${ENDPOINT_NAME} data"
+    _check_cache_with_options "$CACHE_FILE" "sites"
+    local cache_status=$?
+    
+    if [[ $cache_status -eq 0 ]]; then
+        _debugf "Using cached ${ENDPOINT_NAME} data"
         # Use jq to filter domains from the cached file
         _debugf "Filtering ${ENDPOINT_NAME} from cache file: $CACHE_FILE"
         if [[ $EXTENDED == "1" ]]; then
@@ -503,7 +522,8 @@ function _gp_api_list_sites () {
         _loading3 "Total ${ENDPOINT_NAME} found: $TOTAL_DOMAINS"
         return 0
     else
-        _error "Cache not found or disabled, run cache-sites first"
+        _error "Unable to proceed without sites cache."
+        return 1
     fi
 }
 
