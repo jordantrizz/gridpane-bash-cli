@@ -631,7 +631,6 @@ function _gp_api_get_site_formatted () {
     local DOMAIN="$1"
     _gp_select_token
     local SITE_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
-    local SERVER_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
     
     if [[ -z "$DOMAIN" ]]; then
         _error "Error: Domain is required"
@@ -667,34 +666,7 @@ function _gp_api_get_site_formatted () {
     else
         _success "Site cache is fresh."
     fi
-    
-    _loading2 "Checking server cache at $SERVER_CACHE_FILE"
-    _gp_api_cache_age "$SERVER_CACHE_FILE"
-    local server_cache_status=$?
-    if [[ $server_cache_status -ne 0 ]]; then
-        _warning "Server cache not found or expired."
-        echo
-        read -p "Would you like to run 'cache-servers' to populate the server cache? (y/N): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            _loading "Running cache-servers to populate cache..."
-            _gp_api_cache_servers
-            if [[ $? -eq 0 ]]; then
-                _success "Server cache populated successfully."
-                _gp_api_cache_age "$SERVER_CACHE_FILE"
-                server_cache_status=$?
-            else
-                _error "Failed to populate server cache. Please run 'cache-servers' manually."
-                return 1
-            fi
-        else
-            _error "Server cache is required. Please run 'cache-servers' first."
-            return 1
-        fi
-    else
-        _success "Server cache is fresh."
-    fi
-    
+        
     # Get site data - handle multiple sites with same URL
     _debugf "Getting site data for domain: $DOMAIN"
     local sites_data

@@ -90,9 +90,16 @@ function _pre_flight () {
 # =====================================
 # -- _gp_select_token
 # -- Select a GridPane API token from the .gridpane file
-# =============================================================================
+# =====================================
 function _gp_select_token () {
     _debugf "${FUNCNAME[0]} called"
+    
+    # If token is already set, don't prompt again
+    if [[ -n "$GPBC_TOKEN" && -n "$GPBC_TOKEN_NAME" ]]; then
+        _debugf "Token already selected: GPBC_TOKEN_NAME=$GPBC_TOKEN_NAME"
+        return 0
+    fi
+    
     # Source the .gridpane file
     source $TOKEN_FILE
     _debugf "Loaded API credentials from $HOME/.gridpane"
@@ -111,9 +118,9 @@ function _gp_select_token () {
     select profile in "${GP_TOKEN_VAR[@]}"; do
         if [[ -n "$profile" ]]; then
             _debugf "Selected profile: $profile"
-            GPBC_TOKEN="${!profile}"
+            export GPBC_TOKEN="${!profile}"
             # Name is after GPBC_TOKEN_
-            GPBC_TOKEN_NAME="${profile#GPBC_TOKEN_}"
+            export GPBC_TOKEN_NAME="${profile#GPBC_TOKEN_}"
             _debugf "Using GPBC_TOKEN:$GPBC_TOKEN_NAME GPBC_TOKEN:$GPBC_TOKEN"
             break
         else
