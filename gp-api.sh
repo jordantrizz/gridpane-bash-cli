@@ -39,6 +39,7 @@ function _usage() {
     echo "      list-sites-csv              - Fetch sites from the API and output as CSV"
     echo "      get-site <domain>           - Get site details in formatted table output"
     echo "      get-site-json <domain>      - Fetch details of a specific site by domain (JSON)"
+    echo "      get-site-servers <file>     - Get server names for domains listed in file (one per line)"
     echo
     echo " Cache"
     echo "      get-cache-age <endpoint>    - Get the age of the cache"
@@ -111,6 +112,8 @@ elif [[ $CMD == "test-token" ]]; then
 # =============================================
 # -- Servers Commands
 # =============================================
+elif [[ $CMD == "get-servers" ]]; then
+    _gp_api_get_servers
 elif [[ $CMD == "list-servers" ]]; then
     _gp_api_list_servers 0
 # -- list-servers-details
@@ -146,6 +149,14 @@ elif [[ $CMD == "get-site-json" ]]; then
         exit 1
     fi
     _gp_api_get_site $CMD_ACTION
+# -- get-site-servers (bulk domain to server lookup)
+elif [[ $CMD == "get-site-servers" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "No file provided for get-site-servers command"
+        exit 1
+    fi
+    _gp_api_get_site_servers $CMD_ACTION
 # ============================================
 # -- Cache Commands
 # ============================================

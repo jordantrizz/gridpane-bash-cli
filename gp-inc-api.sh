@@ -731,3 +731,113 @@ function _gp_api_get_site_formatted () {
     return 0
 }
 
+# =====================================
+# -- _gp_api_get_site_servers $FILE
+# -- Get server names for domains listed in file (one per line)
+# ======================================
+function _gp_api_get_site_servers () {
+    local DOMAIN_FILE="$1"
+    _gp_select_token
+    local SITE_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    local SERVER_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
+    
+    if [[ -z "$DOMAIN_FILE" ]]; then
+        _error "Error: Domain file is required"
+        return 1
+    fi
+    
+    if [[ ! -f "$DOMAIN_FILE" ]]; then
+        _error "Error: Domain file not found: $DOMAIN_FILE"
+        return 1
+    fi
+
+    # Check if site cache exists and get user preference on age
+    _loading2 "Checking site cache at $SITE_CACHE_FILE"
+    _check_cache_with_options "$SITE_CACHE_FILE" "sites"
+    local site_cache_status=$?
+    
+    if [[ $site_cache_status -ne 0 ]]; then
+        _error "Unable to proceed without site cache."
+        return 1
+    fi
+    
+    # Check if server cache exists (optional but helpful for server names)
+    _loading2 "Checking server cache at $SERVER_CACHE_FILE"
+    if [[ -f "$SERVER_CACHE_FILE" ]]; then
+        _check_cache_with_options "$SERVER_CACHE_FILE" "servers"
+        local server_cache_status=$?
+        if [[ $server_cache_status -ne 0 ]]; then
+            _warning "Server cache unavailable. Will show server IDs instead of names."
+            SERVER_CACHE_FILE=""
+        fi
+    else
+        _warning "Server cache not found. Will show server IDs instead of names."
+        SERVER_CACHE_FILE=""
+    fi
+    
+    # Process each domain in the file
+    _loading3 "Processing domains from file: $DOMAIN_FILE"
+    local OUTPUT=""
+    OUTPUT+="Domain\tServer(s)\n"
+    OUTPUT+="======\t=========\n"
+    
+    while IFS= read -r domain || [[ -n "$domain" ]]; do
+        # Skip empty lines and comments
+        [[ -z "$domain" || "$domain" =~ ^[[:space:]]*# ]] && continue
+        
+        # Trim whitespace
+        domain=$(echo "$domain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -z "$domain" ]] && continue
+        
+        # Get all sites matching this domain (there could be multiple)
+        local sites_data
+        sites_data=$(jq --arg domain "$domain" '[.[] | select(.url == $domain)]' "$SITE_CACHE_FILE" 2>/dev/null)
+        
+        if [[ -z "$sites_data" || "$sites_data" == "null" || "$sites_data" == "[]" ]]; then
+            OUTPUT+="$domain\tNOT_FOUND\n"
+            continue
+        fi
+        
+        # Extract unique server IDs for this domain
+        local server_ids
+        server_ids=$(echo "$sites_data" | jq -r '.[].server_id' 2>/dev/null | sort -u)
+        
+        if [[ -z "$server_ids" || "$server_ids" == "null" ]]; then
+            OUTPUT+="$domain\tNO_SERVERS\n"
+            continue
+        fi
+        
+        # Convert server IDs to server names if server cache is available
+        local server_names=()
+        while IFS= read -r server_id; do
+            [[ -z "$server_id" || "$server_id" == "null" ]] && continue
+            
+            if [[ -n "$SERVER_CACHE_FILE" && -f "$SERVER_CACHE_FILE" ]]; then
+                local server_name
+                server_name=$(jq --arg server_id "$server_id" '.[] | select(.id == ($server_id | tonumber)) | .label' "$SERVER_CACHE_FILE" 2>/dev/null | tr -d '"')
+                if [[ -n "$server_name" && "$server_name" != "null" ]]; then
+                    server_names+=("$server_name")
+                else
+                    server_names+=("ID:$server_id")
+                fi
+            else
+                server_names+=("ID:$server_id")
+            fi
+        done <<< "$server_ids"
+        
+        # Join server names with commas
+        local servers_list
+        if [[ ${#server_names[@]} -gt 0 ]]; then
+            servers_list=$(IFS=','; echo "${server_names[*]}")
+        else
+            servers_list="NO_SERVERS"
+        fi
+        
+        OUTPUT+="$domain\t$servers_list\n"
+        
+    done < "$DOMAIN_FILE"
+    
+    echo -e "$OUTPUT" | column -t -s $'\t'
+    return 0
+}
+
