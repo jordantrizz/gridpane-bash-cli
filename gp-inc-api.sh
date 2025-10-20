@@ -667,6 +667,16 @@ function _gp_api_get_site_formatted () {
         _error "Unable to proceed without site cache."
         return 1
     fi
+    
+    # Check if server cache exists (needed for server name lookup)
+    _loading2 "Checking server cache at $SERVER_CACHE_FILE"
+    _check_cache_with_options "$SERVER_CACHE_FILE" "servers"
+    local server_cache_status=$?
+    
+    if [[ $server_cache_status -ne 0 ]]; then
+        _warning "Server cache unavailable. Server names will show as 'N/A'."
+        # Continue without server cache - we'll show server IDs only
+    fi
         
     # Get site data - handle multiple sites with same URL
     _debugf "Getting site data for domain: $DOMAIN"
@@ -688,10 +698,10 @@ function _gp_api_get_site_formatted () {
     fi
     
     # Output formatted table header
-    printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
+    printf "%-8s %-40s %-12s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
         "ID" "URL" "SSL" "SSL Status" "Server ID" "Server Name" "User ID" "System UID" "Nginx Cache"
-    printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
-        "--------" "----------------------------------------" "------------"  "----------" "--------------------" "--------" "------------" "---------------"
+    printf "%-8s %-40s %-12s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
+        "--------" "----------------------------------------" "------------"  "------------" "----------" "--------------------" "--------" "------------" "---------------"
     
     # Process each site instance
     for ((i=0; i<sites_count; i++)); do
