@@ -572,11 +572,19 @@ function _gp_api_get_urls () {
 # ======================================
 function _gp_api_get_site () {
     local DOMAIN="$1"
-    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    
     if [[ -z "$DOMAIN" ]]; then
         _error "Error: Domain is required"
         return 1
     fi
+    
+    # Sanitize the domain input
+    DOMAIN=$(_sanitize_and_validate_domain "$DOMAIN")
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
 
     # Check cache first
     _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
@@ -649,14 +657,21 @@ function _gp_api_list_servers_csv () {
 # ======================================
 function _gp_api_get_site_formatted () {    
     local DOMAIN="$1"
-    _gp_select_token
-    local SITE_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
-    local SERVER_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
     
     if [[ -z "$DOMAIN" ]]; then
         _error "Error: Domain is required"
         return 1
     fi
+    
+    # Sanitize the domain input
+    DOMAIN=$(_sanitize_and_validate_domain "$DOMAIN")
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    _gp_select_token
+    local SITE_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    local SERVER_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
 
     # Check if site cache exists and get user preference on age
     _loading2 "Checking site cache at $SITE_CACHE_FILE"
@@ -795,9 +810,15 @@ function _gp_api_get_site_servers () {
         # Skip empty lines and comments
         [[ -z "$domain" || "$domain" =~ ^[[:space:]]*# ]] && continue
         
-        # Trim whitespace
-        domain=$(echo "$domain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        # Sanitize the domain (includes trimming whitespace)
+        local original_domain="$domain"
+        domain=$(_sanitize_domain "$domain")
         [[ -z "$domain" ]] && continue
+        
+        # Show sanitization notice if domain was changed
+        if [[ "$original_domain" != "$domain" ]]; then
+            _loading3 "Sanitized domain: '$original_domain' -> '$domain'"
+        fi
         
         # Get all sites matching this domain (there could be multiple)
         local sites_data

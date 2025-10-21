@@ -344,22 +344,111 @@ _get_current_domain() {
     # Extract domain from common command patterns
     local cmd="$1"
     local action="$2"
+    local domain=""
     
     case "$cmd" in
         "get-site"|"get-site-json")
-            echo "$action"
+            domain="$action"
             ;;
         "get-site-servers")
             # For file-based commands, extract first domain from file for caching purposes
             if [[ -f "$action" ]]; then
-                head -n1 "$action" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^#' | head -n1
+                domain=$(head -n1 "$action" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^#' | head -n1)
             fi
             ;;
         *)
             # For other commands, no specific domain
             echo ""
+            return
             ;;
     esac
+    
+    # Sanitize the domain for consistent caching (silent - no notification)
+    if [[ -n "$domain" ]]; then
+        local original_domain="$domain"
+        
+        # Strip leading/trailing whitespace
+        domain=$(echo "$domain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        
+        # Strip protocols (http://, https://)
+        domain=$(echo "$domain" | sed 's|^https\?://||')
+        
+        # Strip www. prefix
+        domain=$(echo "$domain" | sed 's/^www\.//')
+        
+        # Strip trailing slash and path
+        domain=$(echo "$domain" | sed 's|/.*$||')
+        
+        # Strip port numbers (e.g., :8080)
+        domain=$(echo "$domain" | sed 's/:[0-9]*$//')
+        
+        # Final whitespace cleanup
+        domain=$(echo "$domain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        
+        echo "$domain"
+    fi
+}
+
+# =====================================
+# -- Domain Sanitization Functions
+# =====================================
+# Function to sanitize domain input by stripping protocols, www, and whitespace
+_sanitize_domain() {
+    local input_domain="$1"
+    local original_domain="$input_domain"
+    
+    if [[ -z "$input_domain" ]]; then
+        echo ""
+        return 1
+    fi
+    
+    # Strip leading/trailing whitespace
+    input_domain=$(echo "$input_domain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    # Strip protocols (http://, https://)
+    input_domain=$(echo "$input_domain" | sed 's|^https\?://||')
+    
+    # Strip www. prefix
+    input_domain=$(echo "$input_domain" | sed 's/^www\.//')
+    
+    # Strip trailing slash and path
+    input_domain=$(echo "$input_domain" | sed 's|/.*$||')
+    
+    # Strip port numbers (e.g., :8080)
+    input_domain=$(echo "$input_domain" | sed 's/:[0-9]*$//')
+    
+    # Final whitespace cleanup
+    input_domain=$(echo "$input_domain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    # Notify user if domain was modified (send to stderr to avoid capturing in command substitution)
+    if [[ "$original_domain" != "$input_domain" ]]; then
+        _loading3 "Domain sanitized: '$original_domain' -> '$input_domain'" >&2
+    fi
+    
+    echo "$input_domain"
+    return 0
+}
+
+# Function to sanitize domain and validate it's not empty
+_sanitize_and_validate_domain() {
+    local input_domain="$1"
+    local sanitized_domain
+    
+    sanitized_domain=$(_sanitize_domain "$input_domain")
+    
+    if [[ -z "$sanitized_domain" ]]; then
+        _error "Error: Invalid domain after sanitization"
+        return 1
+    fi
+    
+    # Basic domain validation (contains at least one dot and valid characters)
+    if [[ ! "$sanitized_domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$ ]]; then
+        _error "Error: Invalid domain format: '$sanitized_domain'"
+        return 1
+    fi
+    
+    echo "$sanitized_domain"
+    return 0
 }
 
 # =====================================
