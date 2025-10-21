@@ -66,9 +66,9 @@ while [[ $# -gt 0 ]]; do
 key="$1"
 case $key in
     -c|--command)
-    CMD="$2"
+    export CMD="$2"
     shift 2
-    [[ -n $1 ]] && { CMD_ACTION="$1"; shift ; }
+    [[ -n $1 ]] && { export CMD_ACTION="$1"; shift ; }
     _debugf "Command set to: $CMD and action set to: $CMD_ACTION"
     ;;
     -nc|--no-cache)

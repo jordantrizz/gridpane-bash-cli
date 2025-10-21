@@ -231,6 +231,35 @@ function _gp_select_token () {
         return 0
     fi
     
+    # Check for domain-specific cached profile
+    local current_domain=$(_get_current_domain "$CMD" "$CMD_ACTION")
+    local cached_profile=""
+    if [[ -n "$current_domain" ]]; then
+        cached_profile=$(_get_cached_profile_for_domain "$current_domain")
+        if [[ -n "$cached_profile" ]]; then
+            _debugf "Found cached profile for domain $current_domain: $cached_profile"
+            echo
+            _loading3 "Previously used profile for domain '$current_domain': $cached_profile"
+            read -p "Use this profile? (Y/n): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Nn]$ ]]; then
+                _debugf "User declined cached profile, will show selection menu"
+            else
+                # Use cached profile
+                source $TOKEN_FILE
+                local profile_var="GPBC_TOKEN_${cached_profile}"
+                if [[ -n "${!profile_var}" ]]; then
+                    export GPBC_TOKEN="${!profile_var}"
+                    export GPBC_TOKEN_NAME="$cached_profile"
+                    _success "Using cached profile: $cached_profile"
+                    return 0
+                else
+                    _warning "Cached profile '$cached_profile' not found in .gridpane file, will show selection menu"
+                fi
+            fi
+        fi
+    fi
+    
     # Source the .gridpane file
     source $TOKEN_FILE
     _debugf "Loaded API credentials from $HOME/.gridpane"
@@ -253,6 +282,13 @@ function _gp_select_token () {
             # Name is after GPBC_TOKEN_
             export GPBC_TOKEN_NAME="${profile#GPBC_TOKEN_}"
             _debugf "Using GPBC_TOKEN:$GPBC_TOKEN_NAME GPBC_TOKEN:$GPBC_TOKEN"
+            
+            # Cache the domain-profile mapping for future use
+            if [[ -n "$current_domain" ]]; then
+                _cache_domain_profile "$current_domain" "$GPBC_TOKEN_NAME"
+                _debugf "Cached profile selection for domain: $current_domain -> $GPBC_TOKEN_NAME"
+            fi
+            
             break
         else
             _error "Invalid selection. Please try again."
@@ -269,6 +305,62 @@ function _gp_select_token () {
         _error "Please check your .gridpane file and ensure the token value is not blank"
         exit 1
     fi
-    _debugf "GPBC_TOKEN is set to: $GPBC_TOKEN"
+        _debugf "GPBC_TOKEN is set to: $GPBC_TOKEN"
 }
+
+# =====================================
+# -- Domain-to-Profile Mapping Functions
+# =====================================
+# Function to get cached profile for a domain
+_get_cached_profile_for_domain() {
+    local domain="$1"
+    local domain_cache_file="$HOME/.gpbc-domain-cache"
+    
+    if [[ -f "$domain_cache_file" && -n "$domain" ]]; then
+        grep "^${domain}=" "$domain_cache_file" 2>/dev/null | cut -d'=' -f2
+    fi
+}
+
+# Function to cache domain-to-profile mapping
+_cache_domain_profile() {
+    local domain="$1"
+    local profile="$2"
+    local domain_cache_file="$HOME/.gpbc-domain-cache"
+    
+    if [[ -n "$domain" && -n "$profile" ]]; then
+        # Remove existing entry for this domain if it exists
+        if [[ -f "$domain_cache_file" ]]; then
+            grep -v "^${domain}=" "$domain_cache_file" > "${domain_cache_file}.tmp" 2>/dev/null
+            mv "${domain_cache_file}.tmp" "$domain_cache_file"
+        fi
+        # Add new entry
+        echo "${domain}=${profile}" >> "$domain_cache_file"
+        _debugf "Cached domain-profile mapping: ${domain} -> ${profile}"
+    fi
+}
+
+# Function to get domain from command context (for domain-specific commands)
+_get_current_domain() {
+    # Extract domain from common command patterns
+    local cmd="$1"
+    local action="$2"
+    
+    case "$cmd" in
+        "get-site"|"get-site-json")
+            echo "$action"
+            ;;
+        "get-site-servers")
+            # For file-based commands, extract first domain from file for caching purposes
+            if [[ -f "$action" ]]; then
+                head -n1 "$action" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^#' | head -n1
+            fi
+            ;;
+        *)
+            # For other commands, no specific domain
+            echo ""
+            ;;
+    esac
+}
+
+# =====================================
 
