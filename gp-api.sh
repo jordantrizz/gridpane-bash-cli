@@ -49,6 +49,7 @@ function _usage() {
     echo
     echo "Options:"
     echo "  -h, --help                      - Show this help message"
+    echo "  -p, --profile <name>            - Specify the profile to use from .gridpane"
     echo "  -nc,                            - No cache"
     echo "  -d, --debug                     - Enable debug mode"
     echo "  -dapi, --debug-api              - Enable API debug mode"
@@ -70,6 +71,10 @@ case $key in
     shift 2
     [[ -n $1 ]] && { export CMD_ACTION="$1"; shift ; }
     _debugf "Command set to: $CMD and action set to: $CMD_ACTION"
+    ;;
+    -p|--profile)
+    PROFILE_NAME="$2"
+    shift 2
     ;;
     -nc|--no-cache)
     CACHE_ENABLED="0"
@@ -97,6 +102,11 @@ set -- "${POSITIONAL[@]}" # restore positional parameters
 
 _loading "Loading GridPane Bash CLI - $VERSION"
 _pre_flight
+
+# -- Handle profile selection if specified
+if [[ -n "$PROFILE_NAME" ]]; then
+    _gp_set_profile "$PROFILE_NAME"
+fi
 
 # =============================================
 # -- API

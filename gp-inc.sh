@@ -219,6 +219,40 @@ function _pre_flight () {
 }
 
 # =====================================
+# -- _gp_set_profile
+# -- Set a specific profile from the .gridpane file
+# -- Usage: _gp_set_profile <profile_name>
+# =====================================
+function _gp_set_profile () {
+    local profile_name="$1"
+    _debugf "${FUNCNAME[0]} called with profile: $profile_name"
+    
+    if [[ -z "$profile_name" ]]; then
+        _error "Error: No profile name provided"
+        exit 1
+    fi
+    
+    # Source the .gridpane file
+    source "$TOKEN_FILE"
+    
+    # Check if the profile exists
+    local profile_var="GPBC_TOKEN_${profile_name}"
+    if [[ -z "${!profile_var}" ]]; then
+        _error "Error: Profile '$profile_name' not found in $TOKEN_FILE"
+        echo
+        echo "Available profiles:"
+        grep '^GPBC_TOKEN_' "$TOKEN_FILE" | cut -d= -f1 | sed 's/GPBC_TOKEN_/  - /'
+        exit 1
+    fi
+    
+    # Set the token and name
+    export GPBC_TOKEN="${!profile_var}"
+    export GPBC_TOKEN_NAME="$profile_name"
+    _success "Using profile: $profile_name"
+    _debugf "GPBC_TOKEN_NAME=$GPBC_TOKEN_NAME"
+}
+
+# =====================================
 # -- _gp_select_token
 # -- Select a GridPane API token from the .gridpane file
 # =====================================
