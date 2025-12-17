@@ -18,6 +18,53 @@ _loading2 () { echo -e "\e[1;34m\e[7m$1\e[0m"; }
 # -- Dark grey text
 _loading3 () { echo -e "\e[1;30m$1\e[0m"; }
 
+# -- Cross-platform file modification time helper
+_file_mtime() {
+    local target="$1"
+    local mtime
+
+    [[ -z "$target" || ! -e "$target" ]] && return 1
+
+    # macOS/BSD stat
+    if mtime=$(stat -f %m "$target" 2>/dev/null); then
+        echo "$mtime"
+        return 0
+    fi
+
+    # GNU/coreutils stat
+    if mtime=$(stat -c %Y "$target" 2>/dev/null); then
+        echo "$mtime"
+        return 0
+    fi
+
+    # Perl fallback
+    if command -v perl >/dev/null 2>&1; then
+        if mtime=$(perl -e 'my $f = shift; my @s = stat $f; exit 1 unless @s; print int $s[9];' "$target" 2>/dev/null); then
+            echo "$mtime"
+            return 0
+        fi
+    fi
+
+    # Python fallback
+    if command -v python3 >/dev/null 2>&1; then
+        if mtime=$(python3 - "$target" <<'PY' 2>/dev/null
+import os
+import sys
+
+try:
+    print(int(os.path.getmtime(sys.argv[1])))
+except Exception:
+    sys.exit(1)
+PY
+); then
+            echo "$mtime"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 # =====================================
 # -- Helper Functions
 # =====================================
@@ -45,8 +92,8 @@ _check_cache_with_options() {
     local cache_type="${2:-sites}"
     local cache_function="cache-${cache_type}"
     
-    if [[ ! -f "$cache_file" ]]; then
-        _warning "Cache not found for ${cache_type}."
+    if [[ ! -f "$cache_file" ]] || [[ ! -s "$cache_file" ]]; then
+        _warning "Cache not found or empty for ${cache_type}."
         echo
         read -p "Would you like to run '${cache_function}' to populate the cache? (y/N): " -n 1 -r
         echo
@@ -67,12 +114,12 @@ _check_cache_with_options() {
             
             local cache_result=$?
             if [[ $cache_result -eq 0 ]]; then
-                # Verify the cache file was actually created
-                if [[ -f "$cache_file" ]]; then
+                # Verify the cache file was actually created and not empty
+                if [[ -f "$cache_file" ]] && [[ -s "$cache_file" ]]; then
                     _success "Cache populated successfully."
                     return 0
                 else
-                    _error "Cache function succeeded but cache file was not created: $cache_file"
+                    _error "Cache function succeeded but cache file was not created or is empty: $cache_file"
                     return 1
                 fi
             else
@@ -85,8 +132,14 @@ _check_cache_with_options() {
         fi
     fi
     
-    # Cache file exists, check its age
-    local cache_age=$(($(date +%s) - $(stat -c %Y "$cache_file")))
+    # Cache file exists and is not empty, check its age
+    local cache_mtime
+    if ! cache_mtime=$(_file_mtime "$cache_file"); then
+        _error "Unable to determine modification time for cache: $cache_file"
+        return 1
+    fi
+
+    local cache_age=$(( $(date +%s) - cache_mtime ))
     local age_formatted=$(_format_cache_age $cache_age)
     
     # If cache is fresh (less than 1 hour), use it
@@ -216,6 +269,40 @@ function _pre_flight () {
     fi
     _loading3 "Pre-flight checks passed. All required tools are installed and .gridpane file exists."
 
+}
+
+# =====================================
+# -- _gp_set_profile
+# -- Set a specific profile from the .gridpane file
+# -- Usage: _gp_set_profile <profile_name>
+# =====================================
+function _gp_set_profile () {
+    local profile_name="$1"
+    _debugf "${FUNCNAME[0]} called with profile: $profile_name"
+    
+    if [[ -z "$profile_name" ]]; then
+        _error "Error: No profile name provided"
+        exit 1
+    fi
+    
+    # Source the .gridpane file
+    source "$TOKEN_FILE"
+    
+    # Check if the profile exists
+    local profile_var="GPBC_TOKEN_${profile_name}"
+    if [[ -z "${!profile_var}" ]]; then
+        _error "Error: Profile '$profile_name' not found in $TOKEN_FILE"
+        echo
+        echo "Available profiles:"
+        grep '^GPBC_TOKEN_' "$TOKEN_FILE" | cut -d= -f1 | sed 's/GPBC_TOKEN_/  - /'
+        exit 1
+    fi
+    
+    # Set the token and name
+    export GPBC_TOKEN="${!profile_var}"
+    export GPBC_TOKEN_NAME="$profile_name"
+    _success "Using profile: $profile_name"
+    _debugf "GPBC_TOKEN_NAME=$GPBC_TOKEN_NAME"
 }
 
 # =====================================
