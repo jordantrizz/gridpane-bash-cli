@@ -31,12 +31,15 @@ function _usage() {
     echo "      get-servers                 - Fetch servers with page support and json combine"
     echo "      list-servers                - List servers"
     echo "      list-servers-details        - List servers with details"
+    echo "      list-servers-csv            - List servers as CSV (serverid,servername)"
     echo "      list-servers-sites          - List servers with sites"
     echo
     echo "  Sites:"
     echo "      list-sites                  - Fetch sites from the API into cache"
     echo "      list-sites-csv              - Fetch sites from the API and output as CSV"
-    echo "      get-site <domain>           - Fetch a specific site by domain"
+    echo "      get-site <domain>           - Get site details in formatted table output"
+    echo "      get-site-json <domain>      - Fetch details of a specific site by domain (JSON)"
+    echo "      get-site-servers <file>     - Get server names for domains listed in file (one per line)"
     echo
     echo " Cache"
     echo "      get-cache-age <endpoint>    - Get the age of the cache"
@@ -63,9 +66,9 @@ while [[ $# -gt 0 ]]; do
 key="$1"
 case $key in
     -c|--command)
-    CMD="$2"
+    export CMD="$2"
     shift 2
-    [[ -n $1 ]] && { CMD_ACTION="$1"; shift ; }
+    [[ -n $1 ]] && { export CMD_ACTION="$1"; shift ; }
     _debugf "Command set to: $CMD and action set to: $CMD_ACTION"
     ;;
     -nc|--no-cache)
@@ -82,6 +85,7 @@ case $key in
     ;;
     -h|--help)
     _usage
+    exit 0
     ;;
     *)    # unknown option
     POSITIONAL+=("$1") # save it in an array for later
@@ -109,11 +113,16 @@ elif [[ $CMD == "test-token" ]]; then
 # =============================================
 # -- Servers Commands
 # =============================================
+elif [[ $CMD == "get-servers" ]]; then
+    _gp_api_get_servers
 elif [[ $CMD == "list-servers" ]]; then
     _gp_api_list_servers 0
 # -- list-servers-details
 elif [[ $CMD == "list-servers-details" ]]; then
     _gp_api_list_servers 1
+# -- list-servers-csv
+elif [[ $CMD == "list-servers-csv" ]]; then
+    _gp_api_list_servers_csv
 # -- list-servers-sites
 elif [[ $CMD == "list-servers-sites" ]]; then
     _gp_api_list_servers_sites
@@ -125,14 +134,30 @@ elif [[ $CMD == "list-sites" ]]; then
 # -- get-domains
 elif [[ $CMD == "list-sites-csv" ]]; then
     _gp_api_list_sites 1
-# -- get-site
+# -- get-site (formatted output)
 elif [[ $CMD == "get-site" ]]; then
     if [[ -z "$CMD_ACTION" ]]; then
         _usage
         _error "No domain provided for get-site command"
         exit 1
     fi
+    _gp_api_get_site_formatted $CMD_ACTION
+# -- get-site-json (raw JSON output)
+elif [[ $CMD == "get-site-json" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "No domain provided for get-site-json command"
+        exit 1
+    fi
     _gp_api_get_site $CMD_ACTION
+# -- get-site-servers (bulk domain to server lookup)
+elif [[ $CMD == "get-site-servers" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "No file provided for get-site-servers command"
+        exit 1
+    fi
+    _gp_api_get_site_servers $CMD_ACTION
 # ============================================
 # -- Cache Commands
 # ============================================
