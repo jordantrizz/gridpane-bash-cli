@@ -195,6 +195,11 @@ function _gp_api_cache_age () {
         # -- Check if the cache file exists
         if [[ -f "$CACHE_FILE" ]]; then
             _debugf "Cache file exists: $CACHE_FILE"
+            # -- Check if the cache file is empty
+            if [[ ! -s "$CACHE_FILE" ]]; then
+                _debugf "Cache file is empty: $CACHE_FILE"
+                return 1
+            fi
             # -- Get the age of the cache file
             local cache_mtime
             if cache_mtime=$(_file_mtime "$CACHE_FILE"); then

@@ -92,8 +92,8 @@ _check_cache_with_options() {
     local cache_type="${2:-sites}"
     local cache_function="cache-${cache_type}"
     
-    if [[ ! -f "$cache_file" ]]; then
-        _warning "Cache not found for ${cache_type}."
+    if [[ ! -f "$cache_file" ]] || [[ ! -s "$cache_file" ]]; then
+        _warning "Cache not found or empty for ${cache_type}."
         echo
         read -p "Would you like to run '${cache_function}' to populate the cache? (y/N): " -n 1 -r
         echo
@@ -114,12 +114,12 @@ _check_cache_with_options() {
             
             local cache_result=$?
             if [[ $cache_result -eq 0 ]]; then
-                # Verify the cache file was actually created
-                if [[ -f "$cache_file" ]]; then
+                # Verify the cache file was actually created and not empty
+                if [[ -f "$cache_file" ]] && [[ -s "$cache_file" ]]; then
                     _success "Cache populated successfully."
                     return 0
                 else
-                    _error "Cache function succeeded but cache file was not created: $cache_file"
+                    _error "Cache function succeeded but cache file was not created or is empty: $cache_file"
                     return 1
                 fi
             else
@@ -132,7 +132,7 @@ _check_cache_with_options() {
         fi
     fi
     
-    # Cache file exists, check its age
+    # Cache file exists and is not empty, check its age
     local cache_mtime
     if ! cache_mtime=$(_file_mtime "$cache_file"); then
         _error "Unable to determine modification time for cache: $cache_file"
