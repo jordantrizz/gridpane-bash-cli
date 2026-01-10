@@ -379,12 +379,14 @@ function _gp_api_list_servers () {
     _gp_select_token
     CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_${ENDPOINT_NAME}.json"
 
-    # Check cache first
+    # Check cache with user options for age and missing cache
     _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
-    _gp_api_cache_age "$CACHE_FILE"
-    if [[ $? -eq 0 ]]; then
-        _debugf "Cache is fresh, using cached ${ENDPOINT_NAME} data"
-        # Use jq to filter domains from the cached file
+    _check_cache_with_options "$CACHE_FILE" "servers"
+    local cache_status=$?
+
+    if [[ $cache_status -eq 0 ]]; then
+        _debugf "Using cached ${ENDPOINT_NAME} data"
+        # Use jq to filter servers from the cached file
         _debugf "Filtering ${ENDPOINT_NAME} from cache file: $CACHE_FILE"
         if [[ $EXTENDED == "1" ]]; then
             # Extended output with all fields
@@ -394,28 +396,12 @@ function _gp_api_list_servers () {
             DOMAINS=$(jq -r '.[] | .label' "$CACHE_FILE" | sort -u)
         fi
         echo "$DOMAINS"
-        # Total Domains
+        # Total Servers
         TOTAL_DOMAINS=$(echo "$DOMAINS" | wc -l)
         _loading3 "Total ${ENDPOINT_NAME} found: $TOTAL_DOMAINS"
         return 0
     else
-        # Cache not found - prompt user to run cache-servers
-        _handle_cache_not_found "servers"
-        if [[ $? -eq 0 ]]; then
-            # Cache was populated, retry the operation
-            _gp_api_cache_age "$CACHE_FILE"
-            if [[ $? -eq 0 ]]; then
-                if [[ $EXTENDED == "1" ]]; then
-                    DOMAINS=$(jq -r '.[] | "\(.id),\(.label),\(.ip),\(.database),\(.webserver),\(.os_version)"' "$CACHE_FILE")
-                else
-                    DOMAINS=$(jq -r '.[] | .label' "$CACHE_FILE" | sort -u)
-                fi
-                echo "$DOMAINS"
-                TOTAL_DOMAINS=$(echo "$DOMAINS" | wc -l)
-                _loading3 "Total ${ENDPOINT_NAME} found: $TOTAL_DOMAINS"
-                return 0
-            fi
-        fi
+        _error "Unable to proceed without servers cache."
         return 1
     fi
 }
@@ -430,13 +416,13 @@ function _gp_api_list_servers_sites () {
     local SERVER_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
     local SITE_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
 
-    # Check both cache files exist and are fresh
+    # Check both cache files with user options for age and missing cache
     _loading2 "Checking server cache at $SERVER_CACHE_FILE"
-    _gp_api_cache_age "$SERVER_CACHE_FILE"
+    _check_cache_with_options "$SERVER_CACHE_FILE" "servers"
     local SERVER_CACHE_FRESH=$?
 
     _loading2 "Checking site cache at $SITE_CACHE_FILE"
-    _gp_api_cache_age "$SITE_CACHE_FILE"
+    _check_cache_with_options "$SITE_CACHE_FILE" "sites"
     local SITE_CACHE_FRESH=$?
 
     if [[ $SERVER_CACHE_FRESH -eq 0 && $SITE_CACHE_FRESH -eq 0 ]]; then
@@ -452,7 +438,7 @@ function _gp_api_list_servers_sites () {
         ' "$SERVER_CACHE_FILE" | sort -u
         return 0
     else
-        _error "Cache not found or disabled, run cache-servers and cache-sites first"
+        _error "Unable to proceed without both server and site caches."
         return 1
     fi
 }
@@ -638,10 +624,12 @@ function _gp_api_list_servers_csv () {
     _gp_select_token
     CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_${ENDPOINT_NAME}.json"
 
-    # Check cache first
+    # Check cache with user options for age and missing cache
     _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
-    _gp_api_cache_age "$CACHE_FILE"
-    if [[ $? -eq 0 ]]; then
+    _check_cache_with_options "$CACHE_FILE" "servers"
+    local cache_status=$?
+
+    if [[ $cache_status -eq 0 ]]; then
         _debugf "Cache is fresh, using cached ${ENDPOINT_NAME} data"
         # Use jq to filter server id and label from the cached file
         _debugf "Filtering ${ENDPOINT_NAME} from cache file: $CACHE_FILE"
@@ -659,12 +647,7 @@ function _gp_api_list_servers_csv () {
         _loading3 "Total ${ENDPOINT_NAME} found: $TOTAL_SERVERS"
         return 0
     else
-        # Cache not found - prompt user to run cache-servers
-        _handle_cache_not_found "servers"
-        if [[ $? -eq 0 ]]; then
-            # Cache was populated, retry the operation
-            _gp_api_cache_age "$CACHE_FILE"
-        fi
+        _error "Unable to proceed without servers cache."
         return 1
     fi
 }
