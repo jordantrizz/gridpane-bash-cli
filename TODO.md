@@ -7,10 +7,13 @@
 * User can choose to refresh the cache or use the existing stale cache
 * Consistent behavior with sites cache handling
 
-## 2 - Mask Token When Debugging
+## ✅ 2 - Mask Token When Debugging
 
-* Only show the first 15 chars of the token when in debug mode, to avoid exposing the full token in logs.
-* Example: `sk-1234567890abcdefg... (truncated)`
+**COMPLETED** - Added `_mask_token()` helper function that masks API tokens in debug output.
+* Shows first 15 characters of token only
+* Appends "... (truncated)" to indicate masked content  
+* Example output: `sk-1234567890abcdefg... (truncated)`
+* Applied to all debug statements that reference `$GPBC_TOKEN`
 
 ## Completed
 

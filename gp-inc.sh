@@ -18,6 +18,21 @@ _loading2 () { echo -e "\e[1;34m\e[7m$1\e[0m"; }
 # -- Dark grey text
 _loading3 () { echo -e "\e[1;30m$1\e[0m"; }
 
+# -- Mask sensitive tokens in debug output (show first 15 chars + '... (truncated)')
+_mask_token() {
+    local token="$1"
+    if [[ -z "$token" ]]; then
+        echo "<empty>"
+        return
+    fi
+    local length=${#token}
+    if [[ $length -le 15 ]]; then
+        echo "$token"
+    else
+        echo "${token:0:15}... (truncated)"
+    fi
+}
+
 # -- Cross-platform file modification time helper
 _file_mtime() {
     local target="$1"
@@ -368,7 +383,7 @@ function _gp_select_token () {
             export GPBC_TOKEN="${!profile}"
             # Name is after GPBC_TOKEN_
             export GPBC_TOKEN_NAME="${profile#GPBC_TOKEN_}"
-            _debugf "Using GPBC_TOKEN:$GPBC_TOKEN_NAME GPBC_TOKEN:$GPBC_TOKEN"
+            _debugf "Using GPBC_TOKEN_NAME=$GPBC_TOKEN_NAME Token:$(_mask_token "$GPBC_TOKEN")"
             
             # Cache the domain-profile mapping for future use
             if [[ -n "$current_domain" ]]; then
@@ -392,7 +407,7 @@ function _gp_select_token () {
         _error "Please check your .gridpane file and ensure the token value is not blank"
         exit 1
     fi
-        _debugf "GPBC_TOKEN is set to: $GPBC_TOKEN"
+        _debugf "GPBC_TOKEN is set to: $(_mask_token "$GPBC_TOKEN")"
 }
 
 # =====================================
