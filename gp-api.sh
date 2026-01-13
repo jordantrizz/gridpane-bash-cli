@@ -14,6 +14,10 @@ source "$SCRIPT_DIR/gp-inc-api.sh"
 GP_API_URL="https://my.gridpane.com/oauth/api/v1"
 RANDOM_NUM=$((RANDOM % 1000))
 REPORT_FILE="$DATA_DIR/$RANDOM_NUM.json"
+DEBUG_FILE="0"
+DEBUG_FILE_PATH=""
+export DEBUG_FILE
+export DEBUG_FILE_PATH
 
 # =======================================
 # -- Usage
@@ -52,6 +56,7 @@ function _usage() {
     echo "  -p, --profile <name>            - Specify the profile to use from .gridpane"
     echo "  -nc,                            - No cache"
     echo "  -d, --debug                     - Enable debug mode"
+    echo "  -df, --debug-file <path>        - Enable debug file logging (overwrites file)"
     echo "  -dapi, --debug-api              - Enable API debug mode"
 }
 
@@ -81,12 +86,25 @@ case $key in
     shift # past argument
     ;;
     -d|--debug)
-    DEBUG="1"
+    DEBUGF="1"
+    _warning "Debug mode enabled"
     shift # past argument
     ;;
     -dapi|--debug-api)
     DEBUG_API="1"
     shift # past argument
+    ;;
+    -df|--debug-file)
+    DEBUG_FILE="1"
+    # Check if next argument exists and doesn't start with -
+    if [[ -n "$2" && "$2" != -* ]]; then
+        DEBUG_FILE_PATH="$2"
+        shift 2
+    else
+        # Use default path
+        DEBUG_FILE_PATH="$HOME/tmp/gpbc-debug.log"
+        shift
+    fi
     ;;
     -h|--help)
     _usage
@@ -99,6 +117,24 @@ case $key in
 esac
 done
 set -- "${POSITIONAL[@]}" # restore positional parameters
+
+# -- Setup debug file if enabled
+if [[ $DEBUG_FILE == "1" ]]; then
+    # Use default path if not specified
+    if [[ -z "$DEBUG_FILE_PATH" ]]; then
+        DEBUG_FILE_PATH="$HOME/tmp/gpbc-debug.log"
+    fi
+    
+    # Create directory if it doesn't exist
+    mkdir -p "$(dirname "$DEBUG_FILE_PATH")"
+    
+    # Overwrite the file (empty it)
+    > "$DEBUG_FILE_PATH"
+    
+    # Export for use in sourced files
+    export DEBUG_FILE="1"
+    export DEBUG_FILE_PATH="$DEBUG_FILE_PATH"
+fi
 
 _loading "Loading GridPane Bash CLI - $VERSION"
 _pre_flight

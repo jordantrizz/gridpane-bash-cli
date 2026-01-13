@@ -6,8 +6,13 @@ echo "Loaded gp-inc.sh"
 # =====================================
 # -- Core Functions
 # =====================================
-_debugf() { [[ $DEBUG == "1" ]] && echo -e "\e[1;36m*DEBUG* ${@}\e[0m"; }
-_debug_file () { [[ $DEBUG == "1" ]] && echo "$@" >> debug.log; }
+_debugf() {
+    if [[ $DEBUG_FILE == "1" ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') DEBUG: ${@}" >> "$DEBUG_FILE_PATH"
+    elif [[ $DEBUG == "1" ]]; then
+        echo -e "\e[1;36m*DEBUG* ${@}\e[0m"
+    fi
+}
 _error() { echo -e "\e[1;31m$1\e[0m"; }
 _warning() { echo -e "\e[1;33m⚠️  Warning: $1\e[0m"; }
 _success () { echo -e "\e[1;32m$1\e[0m"; }
