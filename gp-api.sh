@@ -44,6 +44,7 @@ function _usage() {
     echo "      get-site <domain>           - Get site details in formatted table output"
     echo "      get-site-json <domain>      - Fetch details of a specific site by domain (JSON)"
     echo "      get-site-servers <file>     - Get server names for domains listed in file (one per line)"
+    echo "      add-site <server_id> <domain> - Add a site to a server"
     echo
     echo " Cache"
     echo "      get-cache-age <endpoint>    - Get the age of the cache"
@@ -75,7 +76,8 @@ case $key in
     export CMD="$2"
     shift 2
     [[ -n $1 ]] && { export CMD_ACTION="$1"; shift ; }
-    _debugf "Command set to: $CMD and action set to: $CMD_ACTION"
+    [[ -n $1 ]] && { export CMD_ACTION2="$1"; shift ; }
+    _debugf "Command set to: $CMD and action set to: $CMD_ACTION (secondary: $CMD_ACTION2)"
     ;;
     -p|--profile)
     PROFILE_NAME="$2"
@@ -204,6 +206,14 @@ elif [[ $CMD == "get-site-servers" ]]; then
         exit 1
     fi
     _gp_api_get_site_servers $CMD_ACTION
+# -- add-site (add a site to a server)
+elif [[ $CMD == "add-site" ]]; then
+    if [[ -z "$CMD_ACTION" ]] || [[ -z "$CMD_ACTION2" ]]; then
+        _usage
+        _error "Server ID and domain are required for add-site command"
+        exit 1
+    fi
+    _gp_api_add_site "$CMD_ACTION" "$CMD_ACTION2"
 # ============================================
 # -- Cache Commands
 # ============================================

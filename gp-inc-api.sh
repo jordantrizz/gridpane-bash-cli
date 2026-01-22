@@ -850,3 +850,74 @@ function _gp_api_get_site_servers () {
     return 0
 }
 
+# =============================================================================
+# -- Add Site Commands
+# =============================================================================
+
+# ======================================
+# -- _gp_api_add_site
+# -- Add a site to a server
+# ======================================
+function _gp_api_add_site () {
+    _debugf "${FUNCNAME[0]} called with SERVER_ID: $1, DOMAIN: $2"
+    
+    local SERVER_ID=$1
+    local DOMAIN=$2
+    
+    # Validate inputs
+    if [[ -z "$SERVER_ID" ]]; then
+        _error "Error: Server ID is required"
+        return 1
+    fi
+    
+    if [[ -z "$DOMAIN" ]]; then
+        _error "Error: Domain is required"
+        return 1
+    fi
+    
+    # Prepare the endpoint
+    local ENDPOINT="/server/${SERVER_ID}/site"
+    
+    # Prepare the JSON payload
+    local PAYLOAD
+    PAYLOAD=$(jq -n --arg domain "$DOMAIN" '{url: $domain}')
+    
+    _loading2 "Adding site '$DOMAIN' to server with ID '$SERVER_ID'"
+    _debugf "Endpoint: $ENDPOINT"
+    _debugf "Payload: $PAYLOAD"
+    
+    # Make the API call with POST method and JSON data
+    CURL_HEADERS=()
+    CURL_HEADERS+=(-H "Authorization: Bearer $GPBC_TOKEN")
+    CURL_HEADERS+=(-H "Content-Type: application/json")
+    
+    CURL_OUTPUT=$(mktemp)
+    CURL_HTTP_CODE="$(curl -s \
+    --output "$CURL_OUTPUT" \
+    -w "%{http_code}\n" \
+    --request POST \
+    --url "${GP_API_URL}${ENDPOINT}" \
+    "${CURL_HEADERS[@]}" \
+    -d "$PAYLOAD")"
+    
+    CURL_EXIT_CODE="$?"
+    CURL_HTTP_CODE=${CURL_HTTP_CODE%%$'\n'*}
+    API_OUTPUT=$(<"$CURL_OUTPUT")
+    
+    _debugf "HTTP Code: $CURL_HTTP_CODE, Exit Code: $CURL_EXIT_CODE"
+    _debugf "API Output: $API_OUTPUT"
+    
+    # Check for success (HTTP 201 for creation or 200 for success)
+    if [[ $CURL_HTTP_CODE -eq 201 || $CURL_HTTP_CODE -eq 200 ]]; then
+        _success "Site '$DOMAIN' successfully added to server with ID '$SERVER_ID'"
+        echo "$API_OUTPUT" | jq -r '.'
+        return 0
+    else
+        _error "Failed to add site. HTTP Code: $CURL_HTTP_CODE"
+        if [[ -n "$API_OUTPUT" ]]; then
+            echo "$API_OUTPUT" | jq -r '.' 2>/dev/null || echo "$API_OUTPUT"
+        fi
+        return 1
+    fi
+}
+
