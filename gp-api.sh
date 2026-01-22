@@ -6,6 +6,7 @@ VERSION="$(cat $SCRIPT_DIR/VERSION)"
 CACHE_ENABLED="1"
 source "$SCRIPT_DIR/gp-inc.sh"
 source "$SCRIPT_DIR/gp-inc-api.sh"
+source "$SCRIPT_DIR/gp-inc-reports.sh"
 [[ -z $DATA_DIR ]] && { DATA_DIR="$SCRIPT_DIR/data"; }
 
 # =======================================
@@ -44,9 +45,13 @@ function _usage() {
     echo "      get-site <domain>           - Get site details in formatted table output"
     echo "      get-site-json <domain>      - Fetch details of a specific site by domain (JSON)"
     echo "      get-site-servers <file>     - Get server names for domains listed in file (one per line)"
-    echo "      add-site <server_id> <domain> - Add a site to a server"
+    echo "      add-site <id> <domain> [php] [pm] [cache] - Add a site to a server"
+    echo "                                  Defaults: php=8.1, pm=fpm, cache=1 (enabled)"
     echo
-    echo " Cache"
+    echo "  Reports:"
+    echo "      report-server-sites         - Report total sites per server (alphabetically sorted)"
+    echo
+    echo "  Cache"
     echo "      get-cache-age <endpoint>    - Get the age of the cache"
     echo "      cache-sites                 - Cache sites from the API"
     echo "      cache-servers               - Cache servers from the API"
@@ -213,7 +218,13 @@ elif [[ $CMD == "add-site" ]]; then
         _error "Server ID and domain are required for add-site command"
         exit 1
     fi
-    _gp_api_add_site "$CMD_ACTION" "$CMD_ACTION2"
+    # Additional optional parameters from POSITIONAL array
+    _gp_api_add_site "$CMD_ACTION" "$CMD_ACTION2" "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}" "${POSITIONAL[2]:-}"
+# ============================================
+# -- Reports Commands
+# ============================================
+elif [[ $CMD == "report-server-sites" ]]; then
+    _gp_report_sites_per_server
 # ============================================
 # -- Cache Commands
 # ============================================

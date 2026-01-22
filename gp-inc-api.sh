@@ -861,8 +861,16 @@ function _gp_api_get_site_servers () {
 function _gp_api_add_site () {
     _debugf "${FUNCNAME[0]} called with SERVER_ID: $1, DOMAIN: $2"
     
+    # Ensure token is selected
+    if [[ -z $GPBC_TOKEN ]]; then
+        _gp_select_token
+    fi
+    
     local SERVER_ID=$1
     local DOMAIN=$2
+    local PHP_VERSION=${3:-"8.1"}
+    local PM=${4:-"fpm"}
+    local NGINX_CACHING=${5:-"1"}
     
     # Validate inputs
     if [[ -z "$SERVER_ID" ]]; then
@@ -876,15 +884,36 @@ function _gp_api_add_site () {
     fi
     
     # Prepare the endpoint
-    local ENDPOINT="/server/${SERVER_ID}/site"
+    local ENDPOINT="/site"
     
-    # Prepare the JSON payload
+    # Normalize nginx_caching value to 0 or 1
+    if [[ "$NGINX_CACHING" == "true" || "$NGINX_CACHING" == "1" || "$NGINX_CACHING" == "yes" ]]; then
+        NGINX_CACHING="1"
+    else
+        NGINX_CACHING="0"
+    fi
+    
+    # Prepare the JSON payload with all required fields
     local PAYLOAD
-    PAYLOAD=$(jq -n --arg domain "$DOMAIN" '{url: $domain}')
+    PAYLOAD=$(jq -n \
+        --arg domain "$DOMAIN" \
+        --arg server_id "$SERVER_ID" \
+        --arg php_version "$PHP_VERSION" \
+        --arg pm "$PM" \
+        --arg nginx_caching "$NGINX_CACHING" \
+        '{
+            url: $domain,
+            server_id: ($server_id | tonumber),
+            php_version: $php_version,
+            pm: $pm,
+            nginx_caching: ($nginx_caching | tonumber)
+        }')
     
     _loading2 "Adding site '$DOMAIN' to server with ID '$SERVER_ID'"
+    _loading3 "Configuration: PHP $PHP_VERSION, PM: $PM, Nginx Caching: $NGINX_CACHING"
     _debugf "Endpoint: $ENDPOINT"
     _debugf "Payload: $PAYLOAD"
+    _debugf "Token (masked): $(_mask_token)"
     
     # Make the API call with POST method and JSON data
     CURL_HEADERS=()
@@ -911,12 +940,16 @@ function _gp_api_add_site () {
     if [[ $CURL_HTTP_CODE -eq 201 || $CURL_HTTP_CODE -eq 200 ]]; then
         _success "Site '$DOMAIN' successfully added to server with ID '$SERVER_ID'"
         echo "$API_OUTPUT" | jq -r '.'
+        rm -f "$CURL_OUTPUT"
         return 0
     else
         _error "Failed to add site. HTTP Code: $CURL_HTTP_CODE"
         if [[ -n "$API_OUTPUT" ]]; then
             echo "$API_OUTPUT" | jq -r '.' 2>/dev/null || echo "$API_OUTPUT"
         fi
+        _warning "Valid PM values: fpm, fastcgi, or check GridPane API documentation"
+        _warning "Nginx Caching: Use 0 (disabled) or 1 (enabled)"
+        rm -f "$CURL_OUTPUT"
         return 1
     fi
 }
