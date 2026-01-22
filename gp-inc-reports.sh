@@ -6,9 +6,11 @@
 # ======================================
 # -- _gp_report_sites_per_server
 # -- Generate a report of total sites per server (alphabetically sorted)
+# -- Parameters: CSV_FLAG (optional) - if set to 1, output as CSV format
 # ======================================
 function _gp_report_sites_per_server () {
-    _debugf "${FUNCNAME[0]} called"
+    local CSV_FLAG="${1:-0}"
+    _debugf "${FUNCNAME[0]} called with CSV_FLAG=$CSV_FLAG"
     _gp_select_token
     
     local SITE_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
@@ -42,39 +44,68 @@ function _gp_report_sites_per_server () {
     # 3. Cross-reference with server cache to get server names
     # 4. Sort alphabetically by server name
     local REPORT
-    REPORT=$(jq -s '
-        # First, get the sites array and count by server_id
-        .[0] as $sites |
-        .[1] as $servers |
+    if [[ $CSV_FLAG -eq 1 ]]; then
+        # CSV output format
+        REPORT=$(jq -s '
+            # First, get the sites array and count by server_id
+            .[0] as $sites |
+            .[1] as $servers |
+            
+            # Create a map of site counts by server_id
+            ($sites | group_by(.server_id) | map({
+                server_id: .[0].server_id,
+                count: length
+            }) | map({(.server_id | tostring): .count}) | add) as $site_counts |
+            
+            # Map through servers and add site counts
+            $servers | map({
+                server_id: .id,
+                server_name: .label,
+                total_sites: ($site_counts[(.id | tostring)] // 0)
+            }) |
+            
+            # Sort alphabetically by server name
+            sort_by(.server_name) |
+            
+            # Format as CSV
+            [["server_id", "server_name", "total_sites"], (.[] | [.server_id, .server_name, .total_sites])]
+        ' "$SITE_CACHE_FILE" "$SERVER_CACHE_FILE" | jq -r '.[] | @csv')
         
-        # Create a map of site counts by server_id
-        ($sites | group_by(.server_id) | map({
-            server_id: .[0].server_id,
-            count: length
-        }) | map({(.server_id | tostring): .count}) | add) as $site_counts |
+        echo "$REPORT"
+    else
+        # Formatted table output
+        REPORT=$(jq -r -s '
+            # First, get the sites array and count by server_id
+            .[0] as $sites |
+            .[1] as $servers |
+            
+            # Create a map of site counts by server_id
+            ($sites | group_by(.server_id) | map({
+                server_id: .[0].server_id,
+                count: length
+            }) | map({(.server_id | tostring): .count}) | add) as $site_counts |
+            
+            # Map through servers and add site counts
+            $servers | map({
+                server_id: .id,
+                server_name: .label,
+                total_sites: ($site_counts[(.id | tostring)] // 0)
+            }) |
+            
+            # Sort alphabetically by server name
+            sort_by(.server_name) |
+            
+            # Format as table rows
+            .[] | 
+            "\(.server_id)\t\(.server_name)\t\(.total_sites)"
+        ' "$SITE_CACHE_FILE" "$SERVER_CACHE_FILE")
         
-        # Map through servers and add site counts
-        $servers | map({
-            server_id: .id,
-            server_name: .label,
-            total_sites: ($site_counts[(.id | tostring)] // 0)
-        }) |
-        
-        # Sort alphabetically by server name
-        sort_by(.server_name) |
-        
-        # Format as table rows
-        .[] | 
-        "\(.server_id)\t\(.server_name)\t\(.total_sites)"
-    ' "$SITE_CACHE_FILE" "$SERVER_CACHE_FILE")
-    
-    # Output the report as a formatted table
-    _success "Report: Sites per Server (alphabetically sorted)"
-    echo
-    echo -e "Server ID\tServer Name\tTotal Sites" | column -t -s $'\t'
-    echo "=========================================="
-    echo -e "$REPORT" | column -t -s $'\t'
-    echo
+        # Output the report as a formatted table
+        _success "Report: Sites per Server (alphabetically sorted)"
+        echo
+        (echo -e "Server ID\tServer Name\tTotal Sites"; echo -e "=========\t===========\t==========="; printf '%s\n' "$REPORT") | column -t -s $'\t'
+        echo
+    fi
     
     return 0
 }

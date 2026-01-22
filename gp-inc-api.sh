@@ -859,39 +859,73 @@ function _gp_api_get_site_servers () {
 # -- Add a site to a server
 # ======================================
 function _gp_api_add_site () {
-    _debugf "${FUNCNAME[0]} called with SERVER_ID: $1, DOMAIN: $2"
+    _debugf "${FUNCNAME[0]} called with DOMAIN: $1, SERVER_ID: $2"
     
     # Ensure token is selected
     if [[ -z $GPBC_TOKEN ]]; then
         _gp_select_token
     fi
     
-    local SERVER_ID=$1
-    local DOMAIN=$2
+    local DOMAIN=$1
+    local SERVER_ID=$2
     local PHP_VERSION=${3:-"8.1"}
     local PM=${4:-"fpm"}
     local NGINX_CACHING=${5:-"1"}
     
     # Validate inputs
+    if [[ -z "$DOMAIN" ]]; then
+        _error "Error: Domain is required"
+        return 1
+    fi
+    
     if [[ -z "$SERVER_ID" ]]; then
         _error "Error: Server ID is required"
         return 1
     fi
     
-    if [[ -z "$DOMAIN" ]]; then
-        _error "Error: Domain is required"
+    # Validate Server ID is numeric
+    if ! [[ "$SERVER_ID" =~ ^[0-9]+$ ]]; then
+        _error "Error: Server ID must be numeric (got: $SERVER_ID)"
+        return 1
+    fi
+    
+    # Validate PHP version
+    local VALID_PHP_VERSIONS=("7.2" "7.3" "7.4")
+    if [[ ! " ${VALID_PHP_VERSIONS[@]} " =~ " ${PHP_VERSION} " ]]; then
+        _error "Error: Invalid PHP version '$PHP_VERSION'"
+        _error "Valid PHP versions: ${VALID_PHP_VERSIONS[*]}"
+        return 1
+    fi
+    
+    # Validate PM (Process Manager)
+    local VALID_PM_VALUES=("dynamic" "static" "ondemand")
+    if [[ ! " ${VALID_PM_VALUES[@]} " =~ " ${PM} " ]]; then
+        _error "Error: Invalid PM value '$PM'"
+        _error "Valid PM values: ${VALID_PM_VALUES[*]}"
         return 1
     fi
     
     # Prepare the endpoint
     local ENDPOINT="/site"
     
-    # Normalize nginx_caching value to 0 or 1
-    if [[ "$NGINX_CACHING" == "true" || "$NGINX_CACHING" == "1" || "$NGINX_CACHING" == "yes" ]]; then
-        NGINX_CACHING="1"
-    else
-        NGINX_CACHING="0"
-    fi
+    # Validate and normalize nginx_caching value
+    case "$NGINX_CACHING" in
+        redis|fastcgi|none)
+            # Valid values - keep as is
+            ;;
+        0|false|disabled)
+            NGINX_CACHING="none"
+            ;;
+        1|true|enabled)
+            _error "Error: nginx_caching cannot use '1' for enable. Use 'redis' or 'fastcgi' instead"
+            return 1
+            ;;
+        *)
+            _error "Error: Invalid nginx caching value '$NGINX_CACHING'"
+            _error "Valid values: redis, fastcgi, or none"
+            return 1
+            ;;
+    esac
     
     # Prepare the JSON payload with all required fields
     local PAYLOAD
@@ -906,7 +940,7 @@ function _gp_api_add_site () {
             server_id: ($server_id | tonumber),
             php_version: $php_version,
             pm: $pm,
-            nginx_caching: ($nginx_caching | tonumber)
+            nginx_caching: $nginx_caching
         }')
     
     _loading2 "Adding site '$DOMAIN' to server with ID '$SERVER_ID'"
@@ -944,11 +978,28 @@ function _gp_api_add_site () {
         return 0
     else
         _error "Failed to add site. HTTP Code: $CURL_HTTP_CODE"
+        
+        # Parse and display structured errors if present
         if [[ -n "$API_OUTPUT" ]]; then
-            echo "$API_OUTPUT" | jq -r '.' 2>/dev/null || echo "$API_OUTPUT"
+            local ERRORS
+            ERRORS=$(echo "$API_OUTPUT" | jq -r '.errors // empty' 2>/dev/null)
+            if [[ -n "$ERRORS" ]]; then
+                _error "API Errors:"
+                # Parse each error field and display error messages
+                echo "$API_OUTPUT" | jq -r '.errors | to_entries[] | .key as $field | .value[] | "  - \($field): \(.)"' 2>/dev/null | while read -r line; do
+                    _error "$line"
+                done
+            else
+                # Fallback to raw JSON output if not structured errors
+                echo "$API_OUTPUT" | jq -r '.' 2>/dev/null || echo "$API_OUTPUT"
+            fi
         fi
-        _warning "Valid PM values: fpm, fastcgi, or check GridPane API documentation"
-        _warning "Nginx Caching: Use 0 (disabled) or 1 (enabled)"
+        
+        _warning "Valid PM values: dynamic, static, ondemand"
+        _warning "Valid PHP versions: 7.2, 7.3, 7.4"
+        _warning "Valid nginx_caching values: redis, fastcgi, none"
+        _warning "Server must be Nginx and must belong to your account"
+        
         rm -f "$CURL_OUTPUT"
         return 1
     fi

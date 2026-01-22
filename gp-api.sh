@@ -45,7 +45,7 @@ function _usage() {
     echo "      get-site <domain>           - Get site details in formatted table output"
     echo "      get-site-json <domain>      - Fetch details of a specific site by domain (JSON)"
     echo "      get-site-servers <file>     - Get server names for domains listed in file (one per line)"
-    echo "      add-site <id> <domain> [php] [pm] [cache] - Add a site to a server"
+    echo "      add-site <domain> <server-id> [php] [pm] [cache] - Add a site to a server"
     echo "                                  Defaults: php=8.1, pm=fpm, cache=1 (enabled)"
     echo
     echo "  Reports:"
@@ -60,6 +60,7 @@ function _usage() {
     echo "Options:"
     echo "  -h, --help                      - Show this help message"
     echo "  -p, --profile <name>            - Specify the profile to use from .gridpane"
+    echo "  --csv                           - Output as CSV format (for report-server-sites)"
     echo "  -nc,                            - No cache"
     echo "  -d, --debug                     - Enable debug mode"
     echo "  -df, --debug-file <path>        - Enable debug file logging (overwrites file)"
@@ -74,31 +75,47 @@ function _usage() {
 # -- Process Arguments
 _debugf "Processing arguments: $@"
 POSITIONAL=()
+CSV_OUTPUT="0"
+DEBUG="0"
 while [[ $# -gt 0 ]]; do
 key="$1"
 case $key in
     -c|--command)
+    if [[ -z "$2" ]]; then
+        _usage
+        _error "No command provided after -c flag"
+        exit 1
+    fi
     export CMD="$2"
     shift 2
-    [[ -n $1 ]] && { export CMD_ACTION="$1"; shift ; }
-    [[ -n $1 ]] && { export CMD_ACTION2="$1"; shift ; }
-    _debugf "Command set to: $CMD and action set to: $CMD_ACTION (secondary: $CMD_ACTION2)"
+    [[ -n $1 && "$1" != -* ]] && { export CMD_ACTION="$1"; shift ; }
+    [[ -n $1 && "$1" != -* ]] && { export CMD_ACTION2="$1"; shift ; }
+    _debugf "  → Command: $CMD | Action: $CMD_ACTION | Secondary: $CMD_ACTION2"
     ;;
     -p|--profile)
     PROFILE_NAME="$2"
+    _debugf "  → Profile: $PROFILE_NAME"
     shift 2
+    ;;
+    --csv)
+    CSV_OUTPUT="1"
+    _debugf "  → CSV output enabled"
+    shift
     ;;
     -nc|--no-cache)
     CACHE_ENABLED="0"
+    _debugf "  → Cache disabled"
     shift # past argument
     ;;
     -d|--debug)
-    DEBUGF="1"
+    DEBUG="1"
     _warning "Debug mode enabled"
+    _debugf "  → Debug flag set to: $DEBUG"
     shift # past argument
     ;;
     -dapi|--debug-api)
     DEBUG_API="1"
+    _debugf "  → API Debug flag set to: $DEBUG_API"
     shift # past argument
     ;;
     -df|--debug-file)
@@ -112,18 +129,21 @@ case $key in
         DEBUG_FILE_PATH="$HOME/tmp/gpbc-debug.log"
         shift
     fi
+    _debugf "  → Debug file enabled: $DEBUG_FILE_PATH"
     ;;
     -h|--help)
     _usage
     exit 0
     ;;
     *)    # unknown option
+    _debugf "  → Positional argument: $1"
     POSITIONAL+=("$1") # save it in an array for later
     shift # past argument
     ;;
 esac
 done
 set -- "${POSITIONAL[@]}" # restore positional parameters
+_debugf "Argument parsing complete. Positional args: ${POSITIONAL[@]}"
 
 # -- Setup debug file if enabled
 if [[ $DEBUG_FILE == "1" ]]; then
@@ -141,7 +161,11 @@ if [[ $DEBUG_FILE == "1" ]]; then
     # Export for use in sourced files
     export DEBUG_FILE="1"
     export DEBUG_FILE_PATH="$DEBUG_FILE_PATH"
+    _debugf "Debug file logging to: $DEBUG_FILE_PATH"
 fi
+
+# Export DEBUG flag for sourced files
+export DEBUG="$DEBUG"
 
 _loading "Loading GridPane Bash CLI - $VERSION"
 _pre_flight
@@ -215,16 +239,16 @@ elif [[ $CMD == "get-site-servers" ]]; then
 elif [[ $CMD == "add-site" ]]; then
     if [[ -z "$CMD_ACTION" ]] || [[ -z "$CMD_ACTION2" ]]; then
         _usage
-        _error "Server ID and domain are required for add-site command"
+        _error "Domain and Server ID are required for add-site command"
         exit 1
     fi
-    # Additional optional parameters from POSITIONAL array
+    # Arguments: domain, server-id, php (optional), pm (optional), cache (optional)
     _gp_api_add_site "$CMD_ACTION" "$CMD_ACTION2" "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}" "${POSITIONAL[2]:-}"
 # ============================================
 # -- Reports Commands
 # ============================================
 elif [[ $CMD == "report-server-sites" ]]; then
-    _gp_report_sites_per_server
+    _gp_report_sites_per_server "$CSV_OUTPUT"
 # ============================================
 # -- Cache Commands
 # ============================================
