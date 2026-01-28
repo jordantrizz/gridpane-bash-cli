@@ -22,6 +22,10 @@ _loading () { echo -e "\e[1;33m\e[7m$1\e[0m"; }
 _loading2 () { echo -e "\e[1;34m\e[7m$1\e[0m"; }
 # -- Dark grey text
 _loading3 () { echo -e "\e[1;30m$1\e[0m"; }
+# -- Dark orange text for cache operations
+_cache () { echo -e "\e[38;5;208mCACHE: $1\e[0m"; }
+# -- Dark red text for live API operations
+_live () { echo -e "\e[38;5;160mLIVE: $1\e[0m"; }
 
 # -- Mask sensitive tokens in debug output (show first 15 chars + '... (truncated)')
 _mask_token() {
@@ -323,6 +327,36 @@ function _gp_set_profile () {
     export GPBC_TOKEN_NAME="$profile_name"
     _success "Using profile: $profile_name"
     _debugf "GPBC_TOKEN_NAME=$GPBC_TOKEN_NAME"
+}
+
+# =====================================
+# -- _gp_set_profile_silent
+# -- Set a specific profile silently (no output or exit on error)
+# -- Usage: _gp_set_profile_silent <profile_name>
+# -- Returns 0 on success, 1 on failure
+# =====================================
+function _gp_set_profile_silent () {
+    local profile_name="$1"
+    _debugf "${FUNCNAME[0]} called with profile: $profile_name"
+    
+    if [[ -z "$profile_name" ]]; then
+        return 1
+    fi
+    
+    # Source the .gridpane file
+    source "$TOKEN_FILE" 2>/dev/null || return 1
+    
+    # Check if the profile exists
+    local profile_var="GPBC_TOKEN_${profile_name}"
+    if [[ -z "${!profile_var}" ]]; then
+        return 1
+    fi
+    
+    # Set the token and name
+    export GPBC_TOKEN="${!profile_var}"
+    export GPBC_TOKEN_NAME="$profile_name"
+    _debugf "Profile set silently: $profile_name"
+    return 0
 }
 
 # =====================================

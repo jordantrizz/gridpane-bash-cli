@@ -7,6 +7,7 @@ CACHE_ENABLED="1"
 source "$SCRIPT_DIR/gp-inc.sh"
 source "$SCRIPT_DIR/gp-inc-api.sh"
 source "$SCRIPT_DIR/gp-inc-reports.sh"
+source "$SCRIPT_DIR/gp-inc-compare.sh"
 [[ -z $DATA_DIR ]] && { DATA_DIR="$SCRIPT_DIR/data"; }
 
 # =======================================
@@ -29,6 +30,7 @@ function _usage() {
     echo "Commands:"
     echo
     echo "  API:"
+    echo "      api-stats                   - Display live API statistics (bypasses cache)"
     echo "      api <endpoint>              - Run an API endpoint (GET only)"
     echo "      test-token                  - Test the API token"
     echo
@@ -38,23 +40,39 @@ function _usage() {
     echo "      list-servers-details        - List servers with details"
     echo "      list-servers-csv            - List servers as CSV (serverid,servername)"
     echo "      list-servers-sites          - List servers with sites"
+    echo "      get-server-build <server-id> - Check server build status and progress"
     echo
     echo "  Sites:"
     echo "      list-sites                  - Fetch sites from the API into cache"
     echo "      list-sites-csv              - Fetch sites from the API and output as CSV"
     echo "      get-site <domain>           - Get site details in formatted table output"
+    echo "      get-site-live <domain>      - Get live site settings from API (using cached site ID)"
     echo "      get-site-json <domain>      - Fetch details of a specific site by domain (JSON)"
+    echo "      compare-sites <domain> <profile1> <profile2> - Compare site settings across profiles"
+    echo "      compare-sites-major <domain> <profile1> <profile2> - Compare major site settings (excludes id, server_id, user_id, etc.)"
     echo "      get-site-servers <file>     - Get server names for domains listed in file (one per line)"
     echo "      add-site <domain> <server-id> [php] [pm] [cache] - Add a site to a server"
-    echo "                                  Defaults: php=8.1, pm=fpm, cache=1 (enabled)"
+    echo "                                  Defaults: php=8.1, pm=dynamic, cache=fastcgi"
+    echo "      add-site-csv <file> [delay]  - Add multiple sites from CSV file"
+    echo "                                  CSV format: domain,server_id,php"
+    echo "                                  Delay in seconds between additions (default: 300)"
     echo
     echo "  Reports:"
     echo "      report-server-sites         - Report total sites per server (alphabetically sorted)"
     echo
+    echo "  System Users:"
+    echo "      get-system-users            - List all system users (formatted)"
+    echo "      get-system-users-json       - List all system users (JSON)"
+    echo "      get-system-user <id/user>   - Get specific system user by ID or username (formatted)"
+    echo "      get-system-user-json <id/user> - Get specific system user by ID or username (JSON)"
+    echo
     echo "  Cache"
+    echo "      cache-stats                 - Display cache statistics (count, size, location)"
+    echo "      cache-status-compare        - Compare cache stats with live API stats"
     echo "      get-cache-age <endpoint>    - Get the age of the cache"
     echo "      cache-sites                 - Cache sites from the API"
     echo "      cache-servers               - Cache servers from the API"
+    echo "      cache-users                 - Cache system users from the API"
     echo "      clear-cache                 - Clear the cache"
     echo
     echo "Options:"
@@ -178,7 +196,9 @@ fi
 # =============================================
 # -- API
 # =============================================
-if [[ $CMD == "api" ]]; then
+if [[ $CMD == "api-stats" ]]; then
+    _gp_api_get_api_stats
+elif [[ $CMD == "api" ]]; then
     [[ -z "$CMD_ACTION" ]] && { echo "Usage: $0 api <action>"; exit 1; }
     gp_api GET "$CMD_ACTION"
     _debugf "API Output: $API_OUTPUT"
@@ -203,6 +223,14 @@ elif [[ $CMD == "list-servers-csv" ]]; then
 # -- list-servers-sites
 elif [[ $CMD == "list-servers-sites" ]]; then
     _gp_api_list_servers_sites
+# -- get-server-build
+elif [[ $CMD == "get-server-build" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "No server-id provided for get-server-build command"
+        exit 1
+    fi
+    _gp_api_get_server_build_status "$CMD_ACTION"
 # ============================================
 # -- Sites Commands
 # ============================================
@@ -219,6 +247,14 @@ elif [[ $CMD == "get-site" ]]; then
         exit 1
     fi
     _gp_api_get_site_formatted $CMD_ACTION
+# -- get-site-live (live API data using cached site ID)
+elif [[ $CMD == "get-site-live" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "No domain provided for get-site-live command"
+        exit 1
+    fi
+    _gp_api_get_site_live $CMD_ACTION
 # -- get-site-json (raw JSON output)
 elif [[ $CMD == "get-site-json" ]]; then
     if [[ -z "$CMD_ACTION" ]]; then
@@ -227,6 +263,12 @@ elif [[ $CMD == "get-site-json" ]]; then
         exit 1
     fi
     _gp_api_get_site $CMD_ACTION
+# -- compare-sites (compare across profiles)
+elif [[ $CMD == "compare-sites" ]]; then
+    _gp_api_compare_sites "$CMD_ACTION" "$CMD_ACTION2" "${POSITIONAL[0]}"
+# -- compare-sites-major (compare major settings only)
+elif [[ $CMD == "compare-sites-major" ]]; then
+    _gp_api_compare_sites_major "$CMD_ACTION" "$CMD_ACTION2" "${POSITIONAL[0]}"
 # -- get-site-servers (bulk domain to server lookup)
 elif [[ $CMD == "get-site-servers" ]]; then
     if [[ -z "$CMD_ACTION" ]]; then
@@ -244,6 +286,27 @@ elif [[ $CMD == "add-site" ]]; then
     fi
     # Arguments: domain, server-id, php (optional), pm (optional), cache (optional)
     _gp_api_add_site "$CMD_ACTION" "$CMD_ACTION2" "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}" "${POSITIONAL[2]:-}"
+# -- add-site-csv (add multiple sites from CSV file)
+elif [[ $CMD == "add-site-csv" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "CSV file path is required for add-site-csv command"
+        exit 1
+    fi
+    if [[ ! -f "$CMD_ACTION" ]]; then
+        _error "File not found: $CMD_ACTION"
+        exit 1
+    fi
+    if [[ ! -r "$CMD_ACTION" ]]; then
+        _error "File is not readable: $CMD_ACTION"
+        exit 1
+    fi
+    DELAY="${CMD_ACTION2:-300}"
+    if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
+        _error "Delay must be a number (seconds)"
+        exit 1
+    fi
+    _gp_csv_add_sites "$CMD_ACTION" "$DELAY"
 # ============================================
 # -- Reports Commands
 # ============================================
@@ -259,10 +322,34 @@ elif [[ $CMD == "get-cache-age" ]]; then
         exit 1
     fi
     _gp_api_cache_age "$CMD_ACTION"
+elif [[ $CMD == "cache-stats" ]]; then
+    _gp_api_cache_stats
+elif [[ $CMD == "cache-status-compare" ]]; then
+    _gp_api_cache_status_compare
 elif [[ $CMD == "cache-sites" ]]; then
     _gp_api_cache_sites
 elif [[ $CMD == "cache-servers" ]]; then
     _gp_api_cache_servers
+elif [[ $CMD == "cache-users" ]]; then
+    _gp_api_cache_users
+elif [[ $CMD == "get-system-users" ]]; then
+    _gp_api_list_system_users_formatted
+elif [[ $CMD == "get-system-users-json" ]]; then
+    _gp_api_get_users
+elif [[ $CMD == "get-system-user" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "User ID or username is required for get-system-user command"
+        exit 1
+    fi
+    _gp_api_get_system_user_formatted "$CMD_ACTION"
+elif [[ $CMD == "get-system-user-json" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "User ID or username is required for get-system-user-json command"
+        exit 1
+    fi
+    _gp_api_get_user "$CMD_ACTION"
 elif [[ $CMD == "clear-cache" ]]; then
     _gp_api_clear_cache
 elif [[ $CMD == "" ]]; then

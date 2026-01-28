@@ -57,6 +57,93 @@ function _gp_test_token () {
 
 }
 
+# ======================================
+# -- _gp_api_get_api_stats
+# -- Get live API statistics (bypasses cache)
+# -- Queries /site and /server with per_page=1 to get total counts
+# ======================================
+function _gp_api_get_api_stats () {
+    _debugf "${FUNCNAME[0]} called"
+    
+    # Ensure a profile is selected
+    if [[ -z $GPBC_TOKEN ]]; then
+        _gp_select_token
+    fi
+    
+    _loading "Fetching live API statistics for profile: $GPBC_TOKEN_NAME"
+    echo
+    
+    local sites_total=0
+    local servers_total=0
+    local sites_error=false
+    local servers_error=false
+    
+    # Fetch sites with per_page=1 to get metadata
+    _debugf "Fetching sites API with per_page=1"
+    gp_api GET "/site?per_page=1"
+    if [[ $? -eq 0 ]]; then
+        # Try to extract total from response
+        # Different API versions may structure this differently
+        sites_total=$(echo "$API_OUTPUT" | jq -r '.meta.total // .total // length' 2>/dev/null)
+        if [[ -z "$sites_total" || "$sites_total" == "null" ]]; then
+            sites_total=$(echo "$API_OUTPUT" | jq 'length' 2>/dev/null || echo "0")
+        fi
+    else
+        _debugf "Failed to fetch sites API: $API_ERROR"
+        sites_error=true
+        sites_total="ERROR"
+    fi
+    
+    # Fetch servers with per_page=1 to get metadata
+    _debugf "Fetching servers API with per_page=1"
+    gp_api GET "/server?per_page=1"
+    if [[ $? -eq 0 ]]; then
+        # Try to extract total from response
+        servers_total=$(echo "$API_OUTPUT" | jq -r '.meta.total // .total // length' 2>/dev/null)
+        if [[ -z "$servers_total" || "$servers_total" == "null" ]]; then
+            servers_total=$(echo "$API_OUTPUT" | jq 'length' 2>/dev/null || echo "0")
+        fi
+    else
+        _debugf "Failed to fetch servers API: $API_ERROR"
+        servers_error=true
+        servers_total="ERROR"
+    fi
+    
+    # Display results in formatted table
+    printf "%-20s %-15s %-40s\n" "Resource" "Total Count" "Profile"
+    printf "%-20s %-15s %-40s\n" "$(printf '=%.0s' {1..19})" "$(printf '=%.0s' {1..14})" "$(printf '=%.0s' {1..39})"
+    
+    if [[ "$sites_error" == true ]]; then
+        printf "%-20s %-15s %-40s\n" "Sites" "ERROR" "$GPBC_TOKEN_NAME"
+        _error "Failed to fetch sites data: $API_ERROR"
+    else
+        printf "%-20s %-15s %-40s\n" "Sites" "$sites_total" "$GPBC_TOKEN_NAME"
+    fi
+    
+    if [[ "$servers_error" == true ]]; then
+        printf "%-20s %-15s %-40s\n" "Servers" "ERROR" "$GPBC_TOKEN_NAME"
+        _error "Failed to fetch servers data: $API_ERROR"
+    else
+        printf "%-20s %-15s %-40s\n" "Servers" "$servers_total" "$GPBC_TOKEN_NAME"
+    fi
+    
+    echo
+    
+    # Display timestamp
+    printf "%-20s %-15s %-40s\n" "$(printf '=%.0s' {1..19})" "$(printf '=%.0s' {1..14})" "$(printf '=%.0s' {1..39})"
+    printf "%-60s\n" "Fetched at: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo
+    
+    # Return error if either failed
+    if [[ "$sites_error" == true || "$servers_error" == true ]]; then
+        _warning "Some API calls failed. Please check your token and network connectivity."
+        return 1
+    fi
+    
+    _success "API statistics retrieved successfully"
+    return 0
+}
+
 # =============================================================================
 # -- Cache
 # =============================================================================
@@ -236,26 +323,71 @@ function _gp_api_cache_age () {
 function _gp_api_cache_sites () {
     _debugf "${FUNCNAME[0]} called"
     _gp_select_token
-    _gp_api_get_sites
-    local get_sites_result=$?
     
-    # Check if _gp_api_get_sites was successful
-    if [[ $get_sites_result -ne 0 ]]; then
-        _error "Failed to fetch sites from API"
+    local ENDPOINT="/site"
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    local PER_PAGE=100
+    local LAST_PAGE
+    local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
+    
+    _loading "Fetching all sites from API with pagination"
+    
+    # Disable caching during pagination to avoid cache overwrite
+    CACHE_ENABLED="0"
+    
+    # Fetch first page to get pagination info
+    gp_api GET "$ENDPOINT?per_page=$PER_PAGE"
+    local api_result=$?
+    
+    if [[ $api_result -ne 0 ]]; then
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+        _error "Failed to fetch sites from API: $API_ERROR"
         return 1
     fi
     
-    # -- Count how many sites are in cache
-    if [[ -n "$API_OUTPUT" ]]; then
-        _debugf "Counting sites in cache via \$API_OUTPUT"
-        TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq 'length')
-        _debugf "Total sites in cache: $TOTAL_ITEMS"
+    # Extract pagination metadata
+    LAST_PAGE=$(echo "$API_OUTPUT" | jq -r '.meta.last_page // "1"')
+    TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq -r '.meta.total // "0"')
+    _debugf "Total sites: $TOTAL_ITEMS, Last page: $LAST_PAGE"
+    
+    if [[ $LAST_PAGE -le 1 ]]; then
+        # Single page - extract data array and save
+        echo "$API_OUTPUT" | jq '.data' > "$CACHE_FILE"
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
         _success "Successfully cached $TOTAL_ITEMS sites"
         return 0
-    else
-        _error "No API output to cache"
-        return 1
     fi
+    
+    # Multiple pages - fetch all and combine
+    local TMP_DIR
+    TMP_DIR=$(mktemp -d)
+    echo "$API_OUTPUT" > "$TMP_DIR/page1.json"
+    
+    # Fetch all other pages
+    for p in $(seq 2 "$LAST_PAGE"); do
+        _loading2 "Fetching page $p of $LAST_PAGE..."
+        _debugf "Fetching page $p of $LAST_PAGE"
+        gp_api GET "$ENDPOINT?page=$p&per_page=$PER_PAGE"
+        local page_result=$?
+        
+        if [[ $page_result -ne 0 ]]; then
+            CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+            _error "Failed to fetch page $p: $API_ERROR"
+            rm -rf "$TMP_DIR"
+            return 1
+        fi
+        echo "$API_OUTPUT" > "$TMP_DIR/page${p}.json"
+    done
+    
+    # Combine all .data[] arrays into one flat array
+    jq -s '[ .[] | .data[] ]' "$TMP_DIR"/page*.json > "$CACHE_FILE"
+    rm -rf "$TMP_DIR"
+    
+    # Re-enable caching
+    CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+    
+    _success "Successfully cached $TOTAL_ITEMS sites"
+    return 0
 }
 
 # =======================================
@@ -267,26 +399,202 @@ function _gp_api_cache_sites () {
 function _gp_api_cache_servers () {
     _debugf "${FUNCNAME[0]} called"
     _gp_select_token
-    _gp_api_get_servers
-    local get_servers_result=$?
-
-    # Check if _gp_api_get_servers was successful
-    if [[ $get_servers_result -ne 0 ]]; then
-        _error "Failed to fetch servers from API"
+    
+    local ENDPOINT="/server"
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
+    local PER_PAGE=100
+    local LAST_PAGE
+    local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
+    
+    _loading "Fetching all servers from API with pagination"
+    
+    # Disable caching during pagination to avoid cache overwrite
+    CACHE_ENABLED="0"
+    
+    # Fetch first page to get pagination info
+    gp_api GET "$ENDPOINT?per_page=$PER_PAGE"
+    local api_result=$?
+    
+    if [[ $api_result -ne 0 ]]; then
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+        _error "Failed to fetch servers from API: $API_ERROR"
         return 1
     fi
-
-    # -- Count how many servers are in cache
-    if [[ -n "$API_OUTPUT" ]]; then
-        _debugf "Counting servers in cache via \$API_OUTPUT"
-        TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq 'length')
-        _debugf "Total servers in cache: $TOTAL_ITEMS"
+    
+    # Extract pagination metadata
+    LAST_PAGE=$(echo "$API_OUTPUT" | jq -r '.meta.last_page // "1"')
+    TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq -r '.meta.total // "0"')
+    _debugf "Total servers: $TOTAL_ITEMS, Last page: $LAST_PAGE"
+    
+    if [[ $LAST_PAGE -le 1 ]]; then
+        # Single page - extract data array and save
+        echo "$API_OUTPUT" | jq '.data' > "$CACHE_FILE"
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
         _success "Successfully cached $TOTAL_ITEMS servers"
         return 0
-    else
-        _error "No API output to cache"
+    fi
+    
+    # Multiple pages - fetch all and combine
+    local TMP_DIR
+    TMP_DIR=$(mktemp -d)
+    echo "$API_OUTPUT" > "$TMP_DIR/page1.json"
+    
+    # Fetch all other pages
+    for p in $(seq 2 "$LAST_PAGE"); do
+        _loading2 "Fetching page $p of $LAST_PAGE..."
+        _debugf "Fetching page $p of $LAST_PAGE"
+        gp_api GET "$ENDPOINT?page=$p&per_page=$PER_PAGE"
+        local page_result=$?
+        
+        if [[ $page_result -ne 0 ]]; then
+            CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+            _error "Failed to fetch page $p: $API_ERROR"
+            rm -rf "$TMP_DIR"
+            return 1
+        fi
+        echo "$API_OUTPUT" > "$TMP_DIR/page${p}.json"
+    done
+    
+    # Combine all .data[] arrays into one flat array
+    jq -s '[ .[] | .data[] ]' "$TMP_DIR"/page*.json > "$CACHE_FILE"
+    rm -rf "$TMP_DIR"
+    
+    # Re-enable caching
+    CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+    
+    _success "Successfully cached $TOTAL_ITEMS servers"
+    return 0
+}
+
+# ======================================
+# -- _gp_api_cache_users
+# -- Cache system users from the GridPane API
+# -- Fetches users from the API and caches them in $CACHE_DIR
+# -- Uses the endpoint /system-user with pagination
+# ======================================
+function _gp_api_cache_users () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    local ENDPOINT="/system-user"
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_system-user.json"
+    local PER_PAGE=100
+    local LAST_PAGE
+    local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
+    
+    _loading "Fetching all system users from API with pagination"
+    
+    # Disable caching during pagination to avoid cache overwrite
+    CACHE_ENABLED="0"
+    
+    # Fetch first page to get pagination info
+    gp_api GET "$ENDPOINT?per_page=$PER_PAGE"
+    local api_result=$?
+    
+    if [[ $api_result -ne 0 ]]; then
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+        _error "Failed to fetch system users from API: $API_ERROR"
         return 1
     fi
+    
+    # Extract pagination metadata
+    LAST_PAGE=$(echo "$API_OUTPUT" | jq -r '.meta.last_page // "1"')
+    TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq -r '.meta.total // "0"')
+    _debugf "Total system users: $TOTAL_ITEMS, Last page: $LAST_PAGE"
+    
+    if [[ $LAST_PAGE -le 1 ]]; then
+        # Single page - extract data array and save
+        echo "$API_OUTPUT" | jq '.data' > "$CACHE_FILE"
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+        _success "Successfully cached $TOTAL_ITEMS system users"
+        return 0
+    fi
+    
+    # Multiple pages - fetch all and combine
+    local TMP_DIR
+    TMP_DIR=$(mktemp -d)
+    echo "$API_OUTPUT" > "$TMP_DIR/page1.json"
+    
+    # Fetch all other pages
+    for p in $(seq 2 "$LAST_PAGE"); do
+        _loading2 "Fetching page $p of $LAST_PAGE..."
+        _debugf "Fetching page $p of $LAST_PAGE"
+        gp_api GET "$ENDPOINT?page=$p&per_page=$PER_PAGE"
+        local page_result=$?
+        
+        if [[ $page_result -ne 0 ]]; then
+            CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+            _error "Failed to fetch page $p: $API_ERROR"
+            rm -rf "$TMP_DIR"
+            return 1
+        fi
+        echo "$API_OUTPUT" > "$TMP_DIR/page${p}.json"
+    done
+    
+    # Combine all .data[] arrays into one flat array
+    jq -s '[ .[] | .data[] ]' "$TMP_DIR"/page*.json > "$CACHE_FILE"
+    rm -rf "$TMP_DIR"
+    
+    # Re-enable caching
+    CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+    
+    _success "Successfully cached $TOTAL_ITEMS system users"
+    return 0
+}
+
+# ======================================
+# -- _gp_api_get_users
+# -- Get all system users from cache
+# -- Returns the full user array
+# ======================================
+function _gp_api_get_users () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_system-user.json"
+    
+    if [[ ! -f "$CACHE_FILE" ]]; then
+        _error "System users cache not found. Run 'cache-users' first."
+        return 1
+    fi
+    
+    cat "$CACHE_FILE"
+    return 0
+}
+
+# ======================================
+# -- _gp_api_get_user $SEARCH_TERM
+# -- Get a specific system user by ID or username
+# -- Returns the user object as JSON
+# ======================================
+function _gp_api_get_user () {
+    local SEARCH_TERM="$1"
+    _debugf "${FUNCNAME[0]} called with SEARCH_TERM: $SEARCH_TERM"
+    _gp_select_token
+    
+    if [[ -z "$SEARCH_TERM" ]]; then
+        _error "User ID or username is required"
+        return 1
+    fi
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_system-user.json"
+    
+    if [[ ! -f "$CACHE_FILE" ]]; then
+        _error "System users cache not found. Run 'cache-users' first."
+        return 1
+    fi
+    
+    # Try to match by ID first (numeric), then by username
+    local result
+    result=$(jq --arg search "$SEARCH_TERM" '.[] | select(.id == ($search | tonumber)? or .username == $search)' "$CACHE_FILE" 2>/dev/null)
+    
+    if [[ -z "$result" ]]; then
+        _error "System user not found: $SEARCH_TERM"
+        return 1
+    fi
+    
+    echo "$result"
+    return 0
 }
 
 # ======================================
@@ -309,6 +617,266 @@ function _gp_api_cache_clear () {
     return 0
 }
 
+# ======================================
+# -- _gp_api_cache_stats
+# -- Display cache statistics
+# -- Shows count, location, size, and API comparison
+# ======================================
+function _gp_api_cache_stats () {
+    _debugf "${FUNCNAME[0]} called"
+    
+    if [[ ! -d "$CACHE_DIR" ]]; then
+        _error "Cache directory does not exist: $CACHE_DIR"
+        return 1
+    fi
+    
+    _loading "Cache Statistics with API Comparison"
+    echo
+    printf "%-22s %-12s %-12s %-12s %-10s\n" "Cache Type" "Cached" "API Total" "Stale" "Size"
+    printf "%-22s %-12s %-12s %-12s %-10s\n" "$(printf '=%.0s' {1..21})" "$(printf '=%.0s' {1..11})" "$(printf '=%.0s' {1..11})" "$(printf '=%.0s' {1..11})" "$(printf '=%.0s' {1..9})"
+    
+    # Process sites cache files
+    local sites_count=0
+    local sites_total_size=0
+    declare -A api_sites_totals
+    
+    for profile_sites in "$CACHE_DIR"/*_site.json; do
+        if [[ -f "$profile_sites" ]]; then
+            local count
+            count=$(jq 'length' "$profile_sites" 2>/dev/null || echo "0")
+            local size
+            size=$(stat -f%z "$profile_sites" 2>/dev/null || stat -c%s "$profile_sites" 2>/dev/null)
+            sites_count=$((sites_count + count))
+            sites_total_size=$((sites_total_size + size))
+            
+            local profile_name
+            profile_name=$(basename "$profile_sites" "_site.json")
+            
+            # Query API for this profile
+            local api_total="?"
+            if _gp_set_profile_silent "$profile_name" 2>/dev/null; then
+                # Save current token
+                local saved_token="$GPBC_TOKEN"
+                local saved_token_name="$GPBC_TOKEN_NAME"
+                
+                # Query API with per_page=1 to get metadata
+                gp_api GET "/site?per_page=1" 2>/dev/null
+                if [[ $? -eq 0 ]]; then
+                    api_total=$(echo "$API_OUTPUT" | jq -r '.meta.total // .total // length' 2>/dev/null)
+                    if [[ -z "$api_total" || "$api_total" == "null" ]]; then
+                        api_total=$(echo "$API_OUTPUT" | jq 'length' 2>/dev/null || echo "?")
+                    fi
+                fi
+                
+                # Restore token
+                GPBC_TOKEN="$saved_token"
+                GPBC_TOKEN_NAME="$saved_token_name"
+            fi
+            
+            api_sites_totals[$profile_name]="$api_total"
+            local size_human
+            size_human=$(_format_bytes "$size")
+            
+            # Determine if stale
+            local stale=""
+            if [[ "$api_total" != "?" ]] && [[ "$count" -lt "$api_total" ]]; then
+                stale="⚠️ YES"
+            fi
+            
+            printf "%-22s %-12s %-12s %-12s %-10s\n" "Sites ($profile_name)" "$count" "$api_total" "$stale" "$size_human"
+        fi
+    done
+    
+    echo
+    
+    # Process servers cache files
+    local servers_count=0
+    local servers_total_size=0
+    declare -A api_servers_totals
+    
+    for profile_servers in "$CACHE_DIR"/*_server.json; do
+        if [[ -f "$profile_servers" ]]; then
+            local count
+            count=$(jq 'length' "$profile_servers" 2>/dev/null || echo "0")
+            local size
+            size=$(stat -f%z "$profile_servers" 2>/dev/null || stat -c%s "$profile_servers" 2>/dev/null)
+            servers_count=$((servers_count + count))
+            servers_total_size=$((servers_total_size + size))
+            
+            local profile_name
+            profile_name=$(basename "$profile_servers" "_server.json")
+            
+            # Query API for this profile
+            local api_total="?"
+            if _gp_set_profile_silent "$profile_name" 2>/dev/null; then
+                # Save current token
+                local saved_token="$GPBC_TOKEN"
+                local saved_token_name="$GPBC_TOKEN_NAME"
+                
+                # Query API with per_page=1 to get metadata
+                gp_api GET "/server?per_page=1" 2>/dev/null
+                if [[ $? -eq 0 ]]; then
+                    api_total=$(echo "$API_OUTPUT" | jq -r '.meta.total // .total // length' 2>/dev/null)
+                    if [[ -z "$api_total" || "$api_total" == "null" ]]; then
+                        api_total=$(echo "$API_OUTPUT" | jq 'length' 2>/dev/null || echo "?")
+                    fi
+                fi
+                
+                # Restore token
+                GPBC_TOKEN="$saved_token"
+                GPBC_TOKEN_NAME="$saved_token_name"
+            fi
+            
+            api_servers_totals[$profile_name]="$api_total"
+            local size_human
+            size_human=$(_format_bytes "$size")
+            
+            # Determine if stale
+            local stale=""
+            if [[ "$api_total" != "?" ]] && [[ "$count" -lt "$api_total" ]]; then
+                stale="⚠️ YES"
+            fi
+            
+            printf "%-22s %-12s %-12s %-12s %-10s\n" "Servers ($profile_name)" "$count" "$api_total" "$stale" "$size_human"
+        fi
+    done
+    
+    echo
+    printf "%-22s %-12s %-12s %-12s %-10s\n" "$(printf '=%.0s' {1..21})" "$(printf '=%.0s' {1..11})" "$(printf '=%.0s' {1..11})" "$(printf '=%.0s' {1..11})" "$(printf '=%.0s' {1..9})"
+    
+    local total_items=$((sites_count + servers_count))
+    local total_size=$((sites_total_size + servers_total_size))
+    local total_size_human
+    total_size_human=$(_format_bytes "$total_size")
+    printf "%-22s %-12s %-12s %-12s %-10s\n" "TOTAL" "$total_items" "-" "-" "$total_size_human"
+    echo
+    printf "Legend: ⚠️ YES = Cache has fewer items than API (cache is stale and should be refreshed)\n"
+    echo
+    _success "Cache statistics retrieved successfully"
+    return 0
+}
+
+# Helper function to format bytes to human-readable size
+_format_bytes () {
+    local bytes=$1
+    if [[ $bytes -lt 1024 ]]; then
+        echo "${bytes}B"
+    elif [[ $bytes -lt 1048576 ]]; then
+        echo "$((bytes / 1024))KB"
+    else
+        echo "$((bytes / 1048576))MB"
+    fi
+}
+
+# ======================================
+# -- _gp_api_cache_status_compare
+# -- Compare cache stats with live API stats
+# -- Shows which caches are stale/incomplete
+# ======================================
+function _gp_api_cache_status_compare () {
+    _debugf "${FUNCNAME[0]} called"
+    
+    if [[ ! -d "$CACHE_DIR" ]]; then
+        _error "Cache directory does not exist: $CACHE_DIR"
+        return 1
+    fi
+    
+    _loading "Comparing cache status with live API statistics"
+    echo
+    
+    # Get list of all unique profile names from cache files
+    local profiles=()
+    for cache_file in "$CACHE_DIR"/*_site.json "$CACHE_DIR"/*_server.json; do
+        if [[ -f "$cache_file" ]]; then
+            local profile
+            profile=$(basename "$cache_file" | sed 's/_site\.json$//' | sed 's/_server\.json$//')
+            # Add to array if not already present
+            if [[ ! " ${profiles[@]} " =~ " ${profile} " ]]; then
+                profiles+=("$profile")
+            fi
+        fi
+    done
+    
+    # Display header
+    printf "%-25s %-15s %-15s %-15s %-20s\n" "Profile" "Cache Sites" "API Sites" "Difference" "Status"
+    printf "%-25s %-15s %-15s %-15s %-20s\n" "$(printf '=%.0s' {1..24})" "$(printf '=%.0s' {1..14})" "$(printf '=%.0s' {1..14})" "$(printf '=%.0s' {1..14})" "$(printf '=%.0s' {1..19})"
+    
+    # Compare each profile
+    for profile in "${profiles[@]}"; do
+        local cache_sites=0
+        local cache_servers=0
+        local api_sites=0
+        local api_servers=0
+        
+        # Get cached sites count
+        local sites_cache_file="$CACHE_DIR/${profile}_site.json"
+        if [[ -f "$sites_cache_file" ]]; then
+            cache_sites=$(jq 'length' "$sites_cache_file" 2>/dev/null || echo "0")
+        fi
+        
+        # Get cached servers count
+        local servers_cache_file="$CACHE_DIR/${profile}_server.json"
+        if [[ -f "$servers_cache_file" ]]; then
+            cache_servers=$(jq 'length' "$servers_cache_file" 2>/dev/null || echo "0")
+        fi
+        
+        # Query API for this profile
+        _debugf "Querying API for profile: $profile"
+        local saved_token="$GPBC_TOKEN"
+        local saved_token_name="$GPBC_TOKEN_NAME"
+        
+        # Set token for this profile
+        _gp_set_profile_silent "$profile" 2>/dev/null
+        
+        # Fetch sites count from API
+        gp_api GET "/site?per_page=1" 2>/dev/null
+        if [[ $? -eq 0 ]]; then
+            api_sites=$(echo "$API_OUTPUT" | jq -r '.meta.total // .total // length' 2>/dev/null)
+            if [[ -z "$api_sites" || "$api_sites" == "null" ]]; then
+                api_sites=$(echo "$API_OUTPUT" | jq 'length' 2>/dev/null || echo "0")
+            fi
+        else
+            api_sites="ERR"
+        fi
+        
+        # Fetch servers count from API
+        gp_api GET "/server?per_page=1" 2>/dev/null
+        if [[ $? -eq 0 ]]; then
+            api_servers=$(echo "$API_OUTPUT" | jq -r '.meta.total // .total // length' 2>/dev/null)
+            if [[ -z "$api_servers" || "$api_servers" == "null" ]]; then
+                api_servers=$(echo "$API_OUTPUT" | jq 'length' 2>/dev/null || echo "0")
+            fi
+        else
+            api_servers="ERR"
+        fi
+        
+        # Restore previous token
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        
+        # Calculate differences and determine status
+        local sites_diff="N/A"
+        local sites_status="✓"
+        if [[ "$api_sites" != "ERR" && "$cache_sites" != "0" ]]; then
+            sites_diff=$((api_sites - cache_sites))
+            if [[ $sites_diff -eq 0 ]]; then
+                sites_status="✓ Fresh"
+            elif [[ $sites_diff -gt 0 ]]; then
+                sites_status="⚠ Stale"
+            fi
+        fi
+        
+        # Display results
+        printf "%-25s %-15s %-15s %-15s %-20s\n" "$profile" "$cache_sites" "$api_sites" "$sites_diff" "$sites_status"
+    done
+    
+    echo
+    _success "Cache status comparison completed"
+    echo "Note: Compare 'Cache Sites' and 'API Sites' columns to identify stale caches"
+    echo
+    return 0
+}
+
 # =============================================================================
 # -- Servers Commands
 # =============================================================================
@@ -322,48 +890,23 @@ function _gp_api_get_servers () {
     local ENDPOINT="/server"
     local ENDPOINT_NAME
     ENDPOINT_NAME=$(echo "$ENDPOINT" | tr -d '/')
-    local PER_PAGE=100
-    local LAST_PAGE
-    CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_${ENDPOINT_NAME}.json"
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_${ENDPOINT_NAME}.json"
 
-    # Check cache first
+    # Check cache with user options for age and missing cache
     _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
-    _gp_api_cache_age "$CACHE_FILE"
-    if [[ $? -eq 0 ]]; then
-        _loading3 "Using cached combined ${ENDPOINT_NAME} data from $CACHE_FILE"
+    _check_cache_with_options "$CACHE_FILE" "servers"
+    local cache_status=$?
+
+    if [[ $cache_status -eq 0 ]]; then
+        _debugf "Cache is available, using cached ${ENDPOINT_NAME} data"
         API_OUTPUT=$(<"$CACHE_FILE")
+        TOTAL_ITEMS=$(jq 'length' "$CACHE_FILE")
+        _loading3 "Total ${ENDPOINT_NAME}: $TOTAL_ITEMS"
+        return 0
     else
-        _loading3 "Cache not found or disabled, fetching data from API"
-        # Fetch first page to get pagination info
-        gp_api GET "$ENDPOINT?per_page=$PER_PAGE"
-        GP_API_RETURN="$?"
-        [[ $GP_API_RETURN != 0 ]] && { _error "Error: $API_ERROR"; exit 1; }
-        LAST_PAGE=$(echo "$API_OUTPUT" | jq -r '.meta.last_page')
-        TOTAL_API_ITEMS=$(echo "$API_OUTPUT" | jq -r '.meta.total')
-        _loading3 "Total ${ENDPOINT_NAME}: $TOTAL_API_ITEMS, Last page: $LAST_PAGE"
-        local TMP_DIR
-        TMP_DIR=$(mktemp -d)
-        echo "$API_OUTPUT" > "$TMP_DIR/page1.json"
-
-        # Fetch all other pages
-        for p in $(seq 2 "$LAST_PAGE"); do
-            _debugf "Fetching page $p of $LAST_PAGE"
-            gp_api GET "$ENDPOINT?page=$p&per_page=$PER_PAGE"
-            GP_API_RETURN="$?"
-            [[ $GP_API_RETURN != 0 ]] && { _error "Error: $API_ERROR"; rm -rf "$TMP_DIR"; exit 1; }
-            echo "$API_OUTPUT" > "$TMP_DIR/page${p}.json"
-        done
-
-        # Combine all .data[] arrays into one
-        jq -s '[ .[] | .data[] ]' "$TMP_DIR"/page*.json > "$CACHE_FILE"
-        rm -rf "$TMP_DIR"
-        _loading "Combined ${ENDPOINT_NAME} data cached to $CACHE_FILE"
-        # Set API_OUTPUT to the combined data
-        API_OUTPUT=$(<"$CACHE_FILE")
+        _error "Unable to proceed without servers cache."
+        return 1
     fi
-
-    TOTAL_ITEMS=$(jq 'length' "$CACHE_FILE")
-    _loading3 "Total ${ENDPOINT_NAME}: $TOTAL_ITEMS"
 }
 
 # =====================================
@@ -453,46 +996,24 @@ function _gp_api_list_servers_sites () {
 # ======================================
 function _gp_api_get_sites () {
     _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
     local ENDPOINT="/site"
     local ENDPOINT_NAME
     ENDPOINT_NAME=$(echo "$ENDPOINT" | tr -d '/')
-    local PER_PAGE=100
-    local LAST_PAGE
-    CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
 
-    # Check cache first
+    # Check cache with user options for age and missing cache
     _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
-    _gp_api_cache_age "$CACHE_FILE"
-    if [[ $? -eq 0 ]]; then
-        _success "Cache exists and is fresh"
+    _check_cache_with_options "$CACHE_FILE" "sites"
+    local cache_status=$?
+
+    if [[ $cache_status -eq 0 ]]; then
+        _debugf "Cache is available, using cached ${ENDPOINT_NAME} data"
         API_OUTPUT=$(<"$CACHE_FILE")
-        _debugf "Using cached site data from $CACHE_FILE"
+        return 0
     else
-        # Fetch first page to get pagination info
-        gp_api GET "$ENDPOINT?per_page=$PER_PAGE"
-        GP_API_RETURN="$?"
-        [[ $GP_API_RETURN != 0 ]] && { _error "Error: $API_ERROR"; exit 1; }
-        LAST_PAGE=$(echo "$API_OUTPUT" | jq -r '.meta.last_page')
-        TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq -r '.meta.total')
-        _loading3 "Total sites: $TOTAL_ITEMS, Last page: $LAST_PAGE"
-        local TMP_DIR
-        TMP_DIR=$(mktemp -d)
-        echo "$API_OUTPUT" > "$TMP_DIR/page1.json"
-
-        # Fetch all other pages
-        for p in $(seq 2 "$LAST_PAGE"); do
-            _debugf "Fetching page $p of $LAST_PAGE"
-            gp_api GET "$ENDPOINT?page=$p&per_page=$PER_PAGE"
-            GP_API_RETURN="$?"
-            [[ $GP_API_RETURN != 0 ]] && { _error "Error: $API_ERROR"; rm -rf "$TMP_DIR"; exit 1; }
-            echo "$API_OUTPUT" > "$TMP_DIR/page${p}.json"
-        done
-
-        # Combine all .data[] arrays into one
-        jq -s '[ .[] | .data[] ]' "$TMP_DIR"/page*.json > "$CACHE_FILE"
-        rm -rf "$TMP_DIR"
-        _debugf "All data from ${CACHE_FILE} combined and cached into \$API_OUTPUT"
-        API_OUTPUT=$(<"$CACHE_FILE")
+        _error "Unable to proceed without sites cache."
+        return 1
     fi
 
 }
@@ -544,13 +1065,16 @@ function _gp_api_list_sites () {
 # -- Fetch domains from GridPane API
 # ======================================
 function _gp_api_get_urls () {
+    _gp_select_token
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
 
-    # Check cache first
-    _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
-    _gp_api_cache_age "$CACHE_FILE"
-    if [[ $? -eq 0 ]]; then
-        _debugf "Using cached site data for domain: $DOMAIN"
+    # Check cache with user options for age and missing cache
+    _loading2 "Checking cache for sites data at $CACHE_FILE"
+    _check_cache_with_options "$CACHE_FILE" "sites"
+    local cache_status=$?
+
+    if [[ $cache_status -eq 0 ]]; then
+        _debugf "Using cached site data"
         # Use jq to filter domains from the cached file
         _debugf "Filtering domains from cache file: $CACHE_FILE"
         DOMAINS=$(jq -r '.[] | .url' "$CACHE_FILE" | sort -u)
@@ -560,19 +1084,7 @@ function _gp_api_get_urls () {
         _loading3 "Total domains found: $TOTAL_DOMAINS"
         return 0
     else
-        # Cache not found - prompt user to run cache-sites
-        _handle_cache_not_found "sites"
-        if [[ $? -eq 0 ]]; then
-            # Cache was populated, retry the operation
-            _gp_api_cache_age "$CACHE_FILE"
-            if [[ $? -eq 0 ]]; then
-                DOMAINS=$(jq -r '.[] | .url' "$CACHE_FILE" | sort -u)
-                echo "$DOMAINS"
-                TOTAL_DOMAINS=$(echo "$DOMAINS" | wc -l)
-                _loading3 "Total domains found: $TOTAL_DOMAINS"
-                return 0
-            fi
-        fi
+        _error "Unable to proceed without sites cache."
         return 1
     fi
 }
@@ -584,30 +1096,23 @@ function _gp_api_get_urls () {
 # ======================================
 function _gp_api_get_site () {
     local DOMAIN="$1"
+    _gp_select_token
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
     if [[ -z "$DOMAIN" ]]; then
         _error "Error: Domain is required"
         return 1
     fi
 
-    # Check cache first
-    _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
-    _gp_api_cache_age "$CACHE_FILE"
-    if [[ $? -eq 0 ]]; then
+    # Check cache with user options for age and missing cache
+    _check_cache_with_options "$CACHE_FILE" "sites" > /dev/null 2>&1
+    local cache_status=$?
+
+    if [[ $cache_status -eq 0 ]]; then
         _debugf "Using cached site data for domain: $DOMAIN"
-        jq --arg domain "$DOMAIN" '.[] | select(.url == $domain)' "$CACHE_FILE"
+        jq --arg domain "$DOMAIN" '.[] | select(.url == $domain)' "$CACHE_FILE" 2>/dev/null
         return 0
     else
-        # Cache not found - prompt user to run cache-sites
-        _handle_cache_not_found "sites"
-        if [[ $? -eq 0 ]]; then
-            # Cache was populated, retry the operation
-            _gp_api_cache_age "$CACHE_FILE"
-            if [[ $? -eq 0 ]]; then
-                jq --arg domain "$DOMAIN" '.[] | select(.url == $domain)' "$CACHE_FILE"
-                return 0
-            fi
-        fi
+        _error "Unable to proceed without sites cache."
         return 1
     fi
 }
@@ -741,6 +1246,83 @@ function _gp_api_get_site_formatted () {
 }
 
 # =====================================
+# -- _gp_api_get_site_live $DOMAIN
+# -- Get live site settings from API using cached site ID
+# -- Requires site cache to be pre-populated
+# ======================================
+function _gp_api_get_site_live () {
+    local DOMAIN="$1"
+    _gp_select_token
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    
+    if [[ -z "$DOMAIN" ]]; then
+        _error "Error: Domain is required"
+        return 1
+    fi
+
+    # Check cache exists
+    if [[ ! -f "$CACHE_FILE" ]]; then
+        _error "Site cache not found. Run: ./gp-api.sh -c cache-sites first"
+        return 1
+    fi
+
+    # Get site ID from cache
+    _debugf "Looking up site ID for domain: $DOMAIN"
+    local site_id
+    site_id=$(jq --arg domain "$DOMAIN" '.[] | select(.url == $domain) | .id' "$CACHE_FILE" 2>/dev/null | head -1)
+    
+    if [[ -z "$site_id" || "$site_id" == "null" ]]; then
+        _error "Site not found in cache: $DOMAIN"
+        return 1
+    fi
+
+    _debugf "Found site ID: $site_id for domain: $DOMAIN"
+    
+    # Fetch live site data from API
+    _loading2 "Fetching live site data from API for site ID: $site_id"
+    local ENDPOINT="/site/$site_id"
+    local RESPONSE
+    RESPONSE=$(curl -s -H "Authorization: Bearer $GPBC_TOKEN" "${GP_API_URL}${ENDPOINT}")
+    
+    if [[ -z "$RESPONSE" ]]; then
+        _error "No response from API"
+        return 1
+    fi
+
+    # Check if response contains an error
+    if echo "$RESPONSE" | jq -e '.errors' >/dev/null 2>&1; then
+        _error "API Error: $(echo "$RESPONSE" | jq -r '.errors[]')"
+        return 1
+    fi
+
+    # Extract the site data from the response
+    local site_data
+    site_data=$(echo "$RESPONSE" | jq '.data // .' 2>/dev/null)
+    
+    if [[ -z "$site_data" || "$site_data" == "null" ]]; then
+        _error "No data returned from API"
+        return 1
+    fi
+
+    # Output formatted table
+    printf "\n%-30s %-45s\n" "Setting" "Value"
+    printf "%-30s %-45s\n" "$(printf '=%.0s' {1..29})" "$(printf '=%.0s' {1..44})"
+    
+    # Display all fields from the API response
+    echo "$site_data" | jq -r 'to_entries[] | "\(.key) \(.value)"' | while read -r key value; do
+        # Truncate long values
+        if [[ ${#value} -gt 45 ]]; then
+            value="${value:0:42}..."
+        fi
+        printf "%-30s %-45s\n" "$key" "$value"
+    done
+    
+    echo
+    _success "Live site data retrieved"
+    return 0
+}
+
+# =====================================
 # -- _gp_api_get_site_servers $FILE
 # -- Get server names for domains listed in file (one per line)
 # ======================================
@@ -851,6 +1433,83 @@ function _gp_api_get_site_servers () {
 }
 
 # =============================================================================
+# -- System User Commands
+# =============================================================================
+
+# ======================================
+# -- _gp_api_list_system_users_formatted
+# -- List system users in formatted output
+# ======================================
+function _gp_api_list_system_users_formatted () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_system-user.json"
+    
+    if [[ ! -f "$CACHE_FILE" ]]; then
+        _error "System users cache not found. Run 'cache-users' first."
+        return 1
+    fi
+    
+    # Output formatted table header
+    printf "%-6s %-20s %-12s\n" "ID" "USERNAME" "SERVER_ID"
+    printf "%-6s %-20s %-12s\n" "------" "--------------------" "------------"
+    
+    # Output user data in formatted columns
+    jq -r '.[] | "\(.id)\t\(.username)\t\(.server_id)"' "$CACHE_FILE" | column -t -s $'\t'
+    
+    local total
+    total=$(jq 'length' "$CACHE_FILE" 2>/dev/null || echo "0")
+    _loading3 "Total system users found: $total"
+    
+    return 0
+}
+
+# ======================================
+# -- _gp_api_get_system_user_formatted
+# -- Get a specific system user in formatted output
+# ======================================
+function _gp_api_get_system_user_formatted () {
+    local SEARCH_TERM="$1"
+    _debugf "${FUNCNAME[0]} called with SEARCH_TERM: $SEARCH_TERM"
+    
+    if [[ -z "$SEARCH_TERM" ]]; then
+        _error "User ID or username is required"
+        return 1
+    fi
+    
+    # Get user data
+    local user_data
+    user_data=$(_gp_api_get_user "$SEARCH_TERM")
+    
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    # Output formatted table header
+    printf "%-15s %-30s\n" "FIELD" "VALUE"
+    printf "%-15s %-30s\n" "---------------" "------------------------------"
+    
+    # Extract and display fields
+    local id username server_id ssh_public_key created_at updated_at
+    id=$(echo "$user_data" | jq -r '.id // "N/A"' 2>/dev/null)
+    username=$(echo "$user_data" | jq -r '.username // "N/A"' 2>/dev/null)
+    server_id=$(echo "$user_data" | jq -r '.server_id // "N/A"' 2>/dev/null)
+    ssh_public_key=$(echo "$user_data" | jq -r '.ssh_public_key // "N/A"' 2>/dev/null)
+    created_at=$(echo "$user_data" | jq -r '.created_at // "N/A"' 2>/dev/null)
+    updated_at=$(echo "$user_data" | jq -r '.updated_at // "N/A"' 2>/dev/null)
+    
+    printf "%-15s %-30s\n" "ID" "$id"
+    printf "%-15s %-30s\n" "Username" "$username"
+    printf "%-15s %-30s\n" "Server ID" "$server_id"
+    printf "%-15s %-30s\n" "SSH Key" "${ssh_public_key:0:27}..."
+    printf "%-15s %-30s\n" "Created" "$created_at"
+    printf "%-15s %-30s\n" "Updated" "$updated_at"
+    
+    return 0
+}
+
+# =============================================================================
 # -- Add Site Commands
 # =============================================================================
 
@@ -869,8 +1528,8 @@ function _gp_api_add_site () {
     local DOMAIN=$1
     local SERVER_ID=$2
     local PHP_VERSION=${3:-"8.1"}
-    local PM=${4:-"fpm"}
-    local NGINX_CACHING=${5:-"1"}
+    local PM=${4:-"dynamic"}
+    local NGINX_CACHING=${5:-"fastcgi"}
     
     # Validate inputs
     if [[ -z "$DOMAIN" ]]; then
@@ -890,7 +1549,7 @@ function _gp_api_add_site () {
     fi
     
     # Validate PHP version
-    local VALID_PHP_VERSIONS=("7.2" "7.3" "7.4")
+    local VALID_PHP_VERSIONS=("7.2" "7.3" "7.4" "8.0" "8.1" "8.2" "8.3" "8.4")
     if [[ ! " ${VALID_PHP_VERSIONS[@]} " =~ " ${PHP_VERSION} " ]]; then
         _error "Error: Invalid PHP version '$PHP_VERSION'"
         _error "Valid PHP versions: ${VALID_PHP_VERSIONS[*]}"
@@ -1005,3 +1664,314 @@ function _gp_api_add_site () {
     fi
 }
 
+# =====================================
+# -- _gp_api_get_server_build_status $SERVER_ID
+# -- Get server build status and progress
+# ======================================
+function _gp_api_get_server_build_status () {
+    local SERVER_ID="$1"
+    
+    if [[ -z "$SERVER_ID" ]]; then
+        _error "Error: Server ID is required"
+        return 1
+    fi
+    
+    _gp_select_token
+    
+    local ENDPOINT="/server/build-progress/$SERVER_ID"
+    
+    _loading2 "Fetching build status for server ID: $SERVER_ID"
+    _debugf "Endpoint: $ENDPOINT"
+    
+    gp_api GET "$ENDPOINT"
+    GP_API_RETURN="$?"
+    
+    if [[ $GP_API_RETURN != 0 ]]; then
+        _error "Failed to fetch build status: $API_ERROR"
+        return 1
+    fi
+    
+    # Check if response indicates success
+    local success
+    success=$(echo "$API_OUTPUT" | jq -r '.success // false' 2>/dev/null)
+    
+    if [[ "$success" != "true" ]]; then
+        _error "API returned unsuccessful response"
+        _debugf "Response: $API_OUTPUT"
+        return 1
+    fi
+    
+    # Extract build status fields
+    local server_id_resp build_status build_percentage current_details updated_at
+    
+    server_id_resp=$(echo "$API_OUTPUT" | jq -r '.server_id // "N/A"' 2>/dev/null)
+    build_status=$(echo "$API_OUTPUT" | jq -r '.build_status // "N/A"' 2>/dev/null)
+    build_percentage=$(echo "$API_OUTPUT" | jq -r '.build_percentage // "N/A"' 2>/dev/null)
+    current_details=$(echo "$API_OUTPUT" | jq -r '.current_details // "N/A"' 2>/dev/null)
+    updated_at=$(echo "$API_OUTPUT" | jq -r '.updated_at // "N/A"' 2>/dev/null)
+    
+    _loading3 "Build status retrieved successfully"
+    
+    # Output formatted table header
+    printf "\n%-20s %-20s\n" "Field" "Value"
+    printf "%-20s %-20s\n" "--------------------" "--------------------"
+    
+    # Output build status information
+    printf "%-20s %-20s\n" "Server ID" "$server_id_resp"
+    printf "%-20s %-20s\n" "Build Status" "$build_status"
+    printf "%-20s %-20s\n" "Build Percentage" "$build_percentage"
+    printf "%-20s %-20s\n" "Current Details" "$current_details"
+    printf "%-20s %-20s\n" "Updated At" "$updated_at"
+    printf "\n"
+    
+    return 0
+}
+
+# ======================================
+# -- _gp_csv_add_sites
+# ======================================
+function _gp_csv_add_sites () {
+    # Parameters:
+    # $1 = CSV_FILE (required, path to CSV file)
+    # $2 = DELAY (optional, seconds between additions, default: 300)
+    
+    local CSV_FILE="$1"
+    local DELAY="${2:-300}"
+    local LOG_FILE="/tmp/gp-add-sites-csv-$(date +%Y%m%d_%H%M%S).log"
+    local PROGRESS_FILE="${CSV_FILE}.progress"
+    local ROW_COUNT=0
+    local ADDED_COUNT=0
+    local SKIPPED_COUNT=0
+    local LINE_NUM=0
+    
+    # Helper function for timestamped logging
+    _log() {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    }
+    
+    _debugf "${FUNCNAME[0]} called with CSV_FILE: $CSV_FILE, DELAY: $DELAY"
+    
+    # Ensure profile/token is selected
+    if [[ -z $GPBC_TOKEN ]]; then
+        _gp_select_token
+        if [[ -z $GPBC_TOKEN ]]; then
+            _error "No profile selected. Cannot proceed with add-site-csv."
+            return 1
+        fi
+    fi
+    
+    # Check for existing progress file
+    if [[ -f "$PROGRESS_FILE" ]]; then
+        local PROGRESS_COUNT=$(wc -l < "$PROGRESS_FILE")
+        _loading3 "Found progress file: $PROGRESS_FILE ($PROGRESS_COUNT sites already processed)"
+        _log "Resuming from progress file: $PROGRESS_FILE ($PROGRESS_COUNT sites already processed)"
+    else
+        _loading3 "No progress file found, starting fresh"
+        _log "No progress file found, starting fresh"
+    fi
+    
+    # Create log file
+    {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] GridPane Add Sites CSV - Started"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] CSV File: $CSV_FILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Progress File: $PROGRESS_FILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Delay: ${DELAY}s"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log File: $LOG_FILE"
+        echo "======================================"
+    } > "$LOG_FILE"
+    
+    # Display log file location to user
+    echo >&2
+    _loading3 "Logging to: $LOG_FILE"
+    _loading3 "Progress file: $PROGRESS_FILE"
+    echo >&2
+    
+    # Read CSV file line by line
+    while IFS=',' read -r line; do
+        ((LINE_NUM++))
+        
+        # Skip header row (first line)
+        if [[ $LINE_NUM -eq 1 ]]; then
+            _log "Header: $line"
+            continue
+        fi
+        
+        # Skip empty lines
+        if [[ -z "${line// }" ]]; then
+            continue
+        fi
+        
+        ((ROW_COUNT++))
+        
+        # Parse CSV fields with whitespace trimming
+        local DOMAIN=$(echo "$line" | cut -d',' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local SERVER_ID=$(echo "$line" | cut -d',' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local PHP=$(echo "$line" | cut -d',' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        
+        # Validate required fields
+        if [[ -z "$DOMAIN" ]] || [[ -z "$SERVER_ID" ]]; then
+            local ERROR_MSG="Row $ROW_COUNT: Missing required fields (domain: '$DOMAIN', server_id: '$SERVER_ID')"
+            _error "$ERROR_MSG"
+            _log "ERROR: $ERROR_MSG"
+            _log "CSV Line: $line"
+            _log "======================================"
+            _log "Processing stopped due to error at row $ROW_COUNT"
+            _error "Full log: $LOG_FILE"
+            return 1
+        fi
+        
+        # Display progress
+        echo >&2
+        _loading2 "Processing: $DOMAIN (row $ROW_COUNT)"
+        _loading3 "  Parameters: domain=$DOMAIN, server_id=$SERVER_ID, php=$PHP"
+        
+        # Log the row being processed
+        _log "Row $ROW_COUNT: domain=$DOMAIN, server_id=$SERVER_ID, php=$PHP"
+        
+        # Check progress file first
+        if [[ -f "$PROGRESS_FILE" ]] && grep -qx "$DOMAIN" "$PROGRESS_FILE" 2>/dev/null; then
+            ((SKIPPED_COUNT++))
+            _cache "Skipping $DOMAIN (already in progress file)"
+            _log "PROGRESS: Skipping $DOMAIN (already in progress file)"
+            continue
+        fi
+        
+        # Check if site already exists using live API
+        _cache "Checking if site already exists..."
+        _log "CACHE: Checking if site already exists via cache lookup..."
+        
+        # Use _gp_api_get_site_live which checks cache for ID then validates via API
+        local SITE_CHECK
+        SITE_CHECK=$(_gp_api_get_site_live "$DOMAIN" 2>&1)
+        local SITE_CHECK_RC=$?
+        
+        if [[ $SITE_CHECK_RC -eq 0 ]]; then
+            # Site exists - skip it
+            _live "Site already exists (confirmed via API), waiting 5 seconds..."
+            _log "LIVE: Site already exists (confirmed via API) - skipping"
+            _log "Waiting 5s..."
+            sleep 5
+            continue
+        else
+            # Site doesn't exist
+            _debugf "Site does not exist (API check failed), proceeding with creation"
+            _log "DEBUG: Site does not exist or not in cache - proceeding with creation"
+        fi
+        
+        # Site doesn't exist - proceed with creation
+        _loading3 "  Site does not exist, waiting 5 seconds before creating..."
+        _log "Site does not exist, proceeding with creation..."
+        _log "Waiting 5s before creation..."
+        sleep 5
+        
+        # Show API call details
+        _live "Sending API request to GridPane..."
+        _log "LIVE: Sending API request: POST /site"
+        _log "  domain: $DOMAIN"
+        _log "  server_id: $SERVER_ID"
+        _log "  php_version: $PHP"
+        
+        # Call add-site API function with retry logic for rate limiting
+        local START_TIME=$(date +%s)
+        local RETRY_COUNT=0
+        local MAX_RETRIES=3
+        local RETRY_DELAY=15
+        local ADD_SITE_OUTPUT
+        local ADD_SITE_RC
+        
+        while [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; do
+            _live "Waiting for API response..."
+            ADD_SITE_OUTPUT=$(_gp_api_add_site "$DOMAIN" "$SERVER_ID" "$PHP" "" "" 2>&1)
+            ADD_SITE_RC=$?
+            
+            # Check for rate limiting (429 or "too fast" message)
+            if echo "$ADD_SITE_OUTPUT" | grep -qi "too fast\|429"; then
+                ((RETRY_COUNT++))
+                local CURRENT_DELAY=$((RETRY_DELAY * RETRY_COUNT))
+                
+                if [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; then
+                    _live "Rate limited! Waiting ${CURRENT_DELAY}s before retry ${RETRY_COUNT}/${MAX_RETRIES}..."
+                    _log "LIVE: Rate limited (429) - Retry ${RETRY_COUNT}/${MAX_RETRIES}, waiting ${CURRENT_DELAY}s..."
+                    sleep "$CURRENT_DELAY"
+                else
+                    _error "  Rate limited! Max retries (${MAX_RETRIES}) exceeded."
+                    _log "LIVE: Rate limited (429) - Max retries exceeded after ${RETRY_COUNT} attempts"
+                fi
+            else
+                # Not rate limited, break out of retry loop
+                break
+            fi
+        done
+        
+        local END_TIME=$(date +%s)
+        local DURATION=$((END_TIME - START_TIME))
+        
+        # Log the output (with timestamp prefix for each line)
+        echo "$ADD_SITE_OUTPUT" | while IFS= read -r line; do
+            _log "$line"
+        done
+        
+        if [[ $ADD_SITE_RC -eq 0 ]]; then
+            ((ADDED_COUNT++))
+            _success "✓ Successfully added (${DURATION}s)"
+            _log "✓ Success - Response received in ${DURATION}s"
+            # Save to progress file
+            echo "$DOMAIN" >> "$PROGRESS_FILE"
+            _log "PROGRESS: Saved $DOMAIN to progress file"
+        else
+            # Check if error is "already exists" - if so, skip instead of stopping
+            if echo "$ADD_SITE_OUTPUT" | grep -qi "already exists"; then
+                _cache "Site already exists on server (not in cache), skipping..."
+                _log "CACHE: Site already exists on server - skipping"
+                # Save to progress file so we don't check again
+                echo "$DOMAIN" >> "$PROGRESS_FILE"
+                _log "PROGRESS: Saved $DOMAIN to progress file (already exists)"
+                _log "Waiting 5s..."
+                sleep 5
+                continue
+            fi
+            
+            # Check if we exhausted retries due to rate limiting
+            if echo "$ADD_SITE_OUTPUT" | grep -qi "too fast\|429"; then
+                _log "✗ Error: Rate limit exceeded after ${MAX_RETRIES} retries"
+            fi
+            
+            # Other errors - stop processing
+            local ERROR_MSG="Failed to add site $DOMAIN to server $SERVER_ID"
+            _error "✗ $ERROR_MSG (${DURATION}s)"
+            _log "✗ Error: $ERROR_MSG (${DURATION}s)"
+            _log "======================================"
+            _log "Processing stopped due to error at row $ROW_COUNT"
+            _error "Full log: $LOG_FILE"
+            return 1
+        fi
+        
+        # Sleep between additions (except after last row)
+        if [[ $ROW_COUNT -lt $(wc -l < "$CSV_FILE") ]]; then
+            _loading3 "  Rate limiting: waiting ${DELAY}s before next site..."
+            _log "Sleeping ${DELAY}s before next addition..."
+            sleep "$DELAY"
+        fi
+        
+    done < "$CSV_FILE"
+    
+    # Final summary
+    _log ""
+    _log "======================================"
+    _log "Summary: $ADDED_COUNT sites added, $SKIPPED_COUNT skipped (out of $ROW_COUNT rows)"
+    _log "Completed"
+    
+    echo >&2
+    _success "✓ Batch job completed!"
+    _success "✓ Added: $ADDED_COUNT | Skipped: $SKIPPED_COUNT | Total rows: $ROW_COUNT"
+    _loading3 "Log file: $LOG_FILE"
+    
+    # Clean up progress file on successful completion
+    if [[ -f "$PROGRESS_FILE" ]]; then
+        _loading3 "Removing progress file (batch completed successfully)"
+        rm -f "$PROGRESS_FILE"
+        _log "PROGRESS: Removed progress file (batch completed successfully)"
+    fi
+    
+    return 0
+}
