@@ -34,6 +34,13 @@ function gp_api () {
     CURL_EXIT_CODE="$?"
     [[ $DEBUGF == "1" ]] && set +x
     API_OUTPUT=$(<"$CURL_OUTPUT")
+    
+    # Debug API response
+    _debugf "API Request: $METHOD ${GP_API_URL}${ENDPOINT}"
+    _debugf "API HTTP Code: $CURL_HTTP_CODE"
+    _debugf "API Curl Exit Code: $CURL_EXIT_CODE"
+    _debugf "API Response: $API_OUTPUT"
+    
     [[ -z "$API_OUTPUT" ]] && { API_ERROR="No API output"; return 1; }
     #[[ $CURL_EXIT_CODE != 0 ]] && { API_ERROR="CURL exit code: $CURL_EXIT_CODE"; return 1; }
     # Remove new line and everything after it
@@ -326,7 +333,7 @@ function _gp_api_cache_sites () {
     
     local ENDPOINT="/site"
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
-    local PER_PAGE=100
+    local PER_PAGE="${GPBC_DEFAULT_PER_PAGE:-100}"
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
@@ -402,7 +409,7 @@ function _gp_api_cache_servers () {
     
     local ENDPOINT="/server"
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
-    local PER_PAGE=100
+    local PER_PAGE="${GPBC_DEFAULT_PER_PAGE:-100}"
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
@@ -478,7 +485,7 @@ function _gp_api_cache_users () {
     
     local ENDPOINT="/system-user"
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_system-user.json"
-    local PER_PAGE=100
+    local PER_PAGE="${GPBC_DEFAULT_PER_PAGE:-100}"
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
@@ -595,6 +602,333 @@ function _gp_api_get_user () {
     
     echo "$result"
     return 0
+}
+
+# =============================================================================
+# -- Domains
+# =============================================================================
+
+# ======================================
+# -- _gp_api_cache_domains
+# -- Cache domains from the GridPane API
+# -- Fetches domains from the API and caches them in $CACHE_DIR
+# -- Uses the endpoint /domain with pagination
+# ======================================
+function _gp_api_cache_domains () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    local ENDPOINT="/domain"
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
+    local PER_PAGE=300  # Domains use higher limit due to larger dataset
+    local LAST_PAGE
+    local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
+    
+    _loading "Fetching all domains from API with pagination"
+    
+    # Disable caching during pagination to avoid cache overwrite
+    CACHE_ENABLED="0"
+    
+    # Fetch first page to get pagination info
+    gp_api GET "$ENDPOINT?per_page=$PER_PAGE"
+    local api_result=$?
+    
+    if [[ $api_result -ne 0 ]]; then
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+        _error "Failed to fetch domains from API: $API_ERROR"
+        return 1
+    fi
+    
+    # Extract pagination metadata
+    LAST_PAGE=$(echo "$API_OUTPUT" | jq -r '.meta.last_page // "1"')
+    TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq -r '.meta.total // "0"')
+    _debugf "Total domains: $TOTAL_ITEMS, Last page: $LAST_PAGE"
+    
+    if [[ $LAST_PAGE -le 1 ]]; then
+        # Single page - extract data array and save
+        echo "$API_OUTPUT" | jq '.data' > "$CACHE_FILE"
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+        _success "Successfully cached $TOTAL_ITEMS domains"
+        return 0
+    fi
+    
+    # Multiple pages - fetch all and combine
+    local TMP_DIR
+    TMP_DIR=$(mktemp -d)
+    echo "$API_OUTPUT" > "$TMP_DIR/page1.json"
+    
+    # Fetch all other pages
+    for p in $(seq 2 "$LAST_PAGE"); do
+        _loading2 "Fetching page $p of $LAST_PAGE..."
+        _debugf "Fetching page $p of $LAST_PAGE"
+        gp_api GET "$ENDPOINT?page=$p&per_page=$PER_PAGE"
+        local page_result=$?
+        
+        if [[ $page_result -ne 0 ]]; then
+            CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+            _error "Failed to fetch page $p: $API_ERROR"
+            rm -rf "$TMP_DIR"
+            return 1
+        fi
+        echo "$API_OUTPUT" > "$TMP_DIR/page${p}.json"
+    done
+    
+    # Combine all .data[] arrays into one flat array
+    jq -s '[ .[] | .data[] ]' "$TMP_DIR"/page*.json > "$CACHE_FILE"
+    rm -rf "$TMP_DIR"
+    
+    # Re-enable caching
+    CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+    
+    _success "Successfully cached $TOTAL_ITEMS domains"
+    return 0
+}
+
+# ======================================
+# -- _gp_api_list_domains
+# -- List all domains from cache
+# -- Returns domain details in formatted table
+# ======================================
+function _gp_api_list_domains () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
+    
+    # Check cache with user options for age and missing cache
+    _loading2 "Checking cache for domains data at $CACHE_FILE"
+    _check_cache_with_options "$CACHE_FILE" "domains"
+    local cache_status=$?
+    
+    if [[ $cache_status -eq 0 ]]; then
+        _debugf "Using cached domains data"
+        # Define header function
+        _print_domain_header() {
+            printf "%-8s %-40s %-8s %-8s %-8s %-10s %-10s %-20s %-15s\n" \
+                "ID" "URL" "Route" "SSL" "Wild" "Site ID" "DNS ID" "Integration" "Provider"
+            printf "%-8s %-40s %-8s %-8s %-8s %-10s %-10s %-20s %-15s\n" \
+                "--------" "----------------------------------------" "--------" "--------" "--------" "----------" "----------" "--------------------" "---------------"
+        }
+        # Output initial header
+        _print_domain_header
+        # Handle potential nested array from API and output data
+        local line_count=0
+        jq -r '
+            (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+            .[] | 
+            "\(.id // "N/A")|\(.url // "N/A")|\(.route // "none")|\(.is_ssl // false)|\(.is_wildcard // false)|\(.site_id // "N/A")|\(.dns_management_id // "N/A")|\(.user_dns.integration_name // "N/A")|\(.user_dns.provider.name // "N/A")"
+        ' "$CACHE_FILE" | sort -t'|' -k2 | while IFS='|' read -r id url route is_ssl is_wildcard site_id dns_id integration provider; do
+            printf "%-8s %-40s %-8s %-8s %-8s %-10s %-10s %-20s %-15s\n" \
+                "$id" "$url" "$route" "$is_ssl" "$is_wildcard" "$site_id" "$dns_id" "$integration" "$provider"
+            ((line_count++))
+            if (( line_count % 10 == 0 )); then
+                echo
+                _print_domain_header
+            fi
+        done
+        local total_domains
+        total_domains=$(jq '(if type == "array" and (.[0] | type) == "array" then .[0] else . end) | length' "$CACHE_FILE")
+        _loading3 "Total domains found: $total_domains"
+        return 0
+    else
+        _error "Unable to proceed without domains cache."
+        return 1
+    fi
+}
+
+# ======================================
+# -- _gp_api_get_domains
+# -- Get all domains from cache
+# -- Returns the full domains array as JSON
+# ======================================
+function _gp_api_get_domains () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
+    
+    # Check cache with user options for age and missing cache
+    _loading2 "Checking cache for domains data at $CACHE_FILE"
+    _check_cache_with_options "$CACHE_FILE" "domains"
+    local cache_status=$?
+    
+    if [[ $cache_status -eq 0 ]]; then
+        _debugf "Using cached domains data"
+        cat "$CACHE_FILE"
+        return 0
+    else
+        _error "Unable to proceed without domains cache."
+        return 1
+    fi
+}
+
+# ======================================
+# -- _gp_api_get_domain $DOMAIN_URL
+# -- Get a specific domain by URL
+# -- Returns the domain object as JSON
+# ======================================
+function _gp_api_get_domain () {
+    local DOMAIN_URL="$1"
+    _debugf "${FUNCNAME[0]} called with DOMAIN_URL: $DOMAIN_URL"
+    _gp_select_token
+    
+    if [[ -z "$DOMAIN_URL" ]]; then
+        _error "Domain URL is required"
+        return 1
+    fi
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
+    
+    # Check cache with user options for age and missing cache
+    _check_cache_with_options "$CACHE_FILE" "domains" > /dev/null 2>&1
+    local cache_status=$?
+    
+    if [[ $cache_status -ne 0 ]]; then
+        _error "Unable to proceed without domains cache."
+        return 1
+    fi
+    
+    # Match by url, domain_url, or name field (handle potential nested array)
+    local result
+    result=$(jq --arg url "$DOMAIN_URL" '
+        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+        .[] | select(.url == $url or .domain_url == $url or .name == $url)
+    ' "$CACHE_FILE" 2>/dev/null)
+    
+    if [[ -z "$result" ]]; then
+        _error "Domain not found: $DOMAIN_URL"
+        return 1
+    fi
+    
+    echo "$result"
+    return 0
+}
+
+# ======================================
+# -- _gp_api_get_domain_formatted $DOMAIN_URL
+# -- Get a specific domain by URL with formatted output
+# -- Returns human-readable domain details
+# ======================================
+function _gp_api_get_domain_formatted () {
+    local DOMAIN_URL="$1"
+    _debugf "${FUNCNAME[0]} called with DOMAIN_URL: $DOMAIN_URL"
+    
+    local domain_json
+    domain_json=$(_gp_api_get_domain "$DOMAIN_URL")
+    local result=$?
+    
+    if [[ $result -ne 0 ]]; then
+        return 1
+    fi
+    
+    # Extract fields
+    local id url site_id server_id domain_type ssl routing wildcard
+    id=$(echo "$domain_json" | jq -r '.id // "N/A"')
+    url=$(echo "$domain_json" | jq -r '.url // .domain_url // .name // "N/A"')
+    site_id=$(echo "$domain_json" | jq -r '.site_id // "N/A"')
+    server_id=$(echo "$domain_json" | jq -r '.server_id // "N/A"')
+    domain_type=$(echo "$domain_json" | jq -r '.type // "N/A"')
+    ssl=$(echo "$domain_json" | jq -r '.ssl // "N/A"')
+    routing=$(echo "$domain_json" | jq -r '.routing // "N/A"')
+    wildcard=$(echo "$domain_json" | jq -r '.wildcard // "N/A"')
+    
+    # Lookup site URL from sites cache
+    local site_url="N/A"
+    local SITES_CACHE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    if [[ -f "$SITES_CACHE" ]] && [[ "$site_id" != "N/A" ]]; then
+        site_url=$(jq -r --arg sid "$site_id" '.[] | select(.id == ($sid | tonumber)) | .url' "$SITES_CACHE" 2>/dev/null)
+        [[ -z "$site_url" ]] && site_url="N/A"
+    fi
+    
+    echo "Domain Details:"
+    echo "  ID:          $id"
+    echo "  URL:         $url"
+    echo "  Type:        $domain_type"
+    echo "  Site ID:     $site_id"
+    echo "  Site URL:    $site_url"
+    echo "  Server ID:   $server_id"
+    echo "  SSL:         $ssl"
+    echo "  Routing:     $routing"
+    echo "  Wildcard:    $wildcard"
+    
+    return 0
+}
+
+# ======================================
+# -- _gp_api_get_domains_for_site $SITE_ID
+# -- Get all domains for a specific site
+# -- Returns the domains as JSON array
+# ======================================
+function _gp_api_get_domains_for_site () {
+    local SITE_ID="$1"
+    _debugf "${FUNCNAME[0]} called with SITE_ID: $SITE_ID"
+    _gp_select_token
+    
+    if [[ -z "$SITE_ID" ]]; then
+        _error "Site ID is required"
+        return 1
+    fi
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
+    
+    if [[ ! -f "$CACHE_FILE" ]]; then
+        _debugf "Domains cache not found"
+        echo "[]"
+        return 0
+    fi
+    
+    jq --arg sid "$SITE_ID" '
+        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+        [ .[] | select(.site_id == ($sid | tonumber)) ]
+    ' "$CACHE_FILE" 2>/dev/null
+    return 0
+}
+
+# ======================================
+# -- _gp_api_get_primary_domain_for_site $SITE_ID
+# -- Get the primary domain for a site
+# -- If no primary, returns first alias, or empty
+# ======================================
+function _gp_api_get_primary_domain_for_site () {
+    local SITE_ID="$1"
+    _debugf "${FUNCNAME[0]} called with SITE_ID: $SITE_ID"
+    _gp_select_token
+    
+    if [[ -z "$SITE_ID" ]]; then
+        return 1
+    fi
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
+    
+    if [[ ! -f "$CACHE_FILE" ]]; then
+        return 1
+    fi
+    
+    # Try to get primary domain first (handle potential nested array)
+    local primary
+    primary=$(jq -r --arg sid "$SITE_ID" '
+        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+        .[] | select(.site_id == ($sid | tonumber) and .type == "primary") | .url // .domain_url // .name
+    ' "$CACHE_FILE" 2>/dev/null | head -1)
+    
+    if [[ -n "$primary" ]]; then
+        echo "$primary"
+        return 0
+    fi
+    
+    # Fallback to first alias (handle potential nested array)
+    local alias_domain
+    alias_domain=$(jq -r --arg sid "$SITE_ID" '
+        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+        .[] | select(.site_id == ($sid | tonumber)) | .url // .domain_url // .name
+    ' "$CACHE_FILE" 2>/dev/null | head -1)
+    
+    if [[ -n "$alias_domain" ]]; then
+        echo "$alias_domain"
+        return 0
+    fi
+    
+    return 1
 }
 
 # ======================================
@@ -742,10 +1076,64 @@ function _gp_api_cache_stats () {
     done
     
     echo
+    
+    # Process domains cache files
+    local domains_count=0
+    local domains_total_size=0
+    declare -A api_domains_totals
+    
+    for profile_domains in "$CACHE_DIR"/*_domain.json; do
+        if [[ -f "$profile_domains" ]]; then
+            local count
+            count=$(jq 'length' "$profile_domains" 2>/dev/null || echo "0")
+            local size
+            size=$(stat -f%z "$profile_domains" 2>/dev/null || stat -c%s "$profile_domains" 2>/dev/null)
+            domains_count=$((domains_count + count))
+            domains_total_size=$((domains_total_size + size))
+            
+            local profile_name
+            profile_name=$(basename "$profile_domains" "_domain.json")
+            
+            # Query API for this profile
+            local api_total="?"
+            if _gp_set_profile_silent "$profile_name" 2>/dev/null; then
+                # Save current token
+                local saved_token="$GPBC_TOKEN"
+                local saved_token_name="$GPBC_TOKEN_NAME"
+                
+                # Query API with per_page=1 to get metadata
+                gp_api GET "/domain?per_page=1" 2>/dev/null
+                if [[ $? -eq 0 ]]; then
+                    api_total=$(echo "$API_OUTPUT" | jq -r '.meta.total // .total // length' 2>/dev/null)
+                    if [[ -z "$api_total" || "$api_total" == "null" ]]; then
+                        api_total=$(echo "$API_OUTPUT" | jq 'length' 2>/dev/null || echo "?")
+                    fi
+                fi
+                
+                # Restore token
+                GPBC_TOKEN="$saved_token"
+                GPBC_TOKEN_NAME="$saved_token_name"
+            fi
+            
+            api_domains_totals[$profile_name]="$api_total"
+            local size_human
+            size_human=$(_format_bytes "$size")
+            
+            # Determine if stale
+            local stale=""
+            if [[ "$api_total" != "?" ]] && [[ "$count" -lt "$api_total" ]]; then
+                stale="⚠️ YES"
+            fi
+            
+            printf "%-22s %-12s %-12s %-12s %-10s\n" "Domains ($profile_name)" "$count" "$api_total" "$stale" "$size_human"
+        fi
+    done
+    
+    echo
     printf "%-22s %-12s %-12s %-12s %-10s\n" "$(printf '=%.0s' {1..21})" "$(printf '=%.0s' {1..11})" "$(printf '=%.0s' {1..11})" "$(printf '=%.0s' {1..11})" "$(printf '=%.0s' {1..9})"
     
-    local total_items=$((sites_count + servers_count))
-    local total_size=$((sites_total_size + servers_total_size))
+    local total_items=$((sites_count + servers_count + domains_count))
+    local total_size=$((sites_total_size + servers_total_size + domains_total_size))
     local total_size_human
     total_size_human=$(_format_bytes "$total_size")
     printf "%-22s %-12s %-12s %-12s %-10s\n" "TOTAL" "$total_items" "-" "-" "$total_size_human"
@@ -1030,6 +1418,7 @@ function _gp_api_list_sites () {
     ENDPOINT_NAME=$(echo "$ENDPOINT" | tr -d '/')
     _gp_select_token
     CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_${ENDPOINT_NAME}.json"
+    local DOMAIN_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
 
     # Check cache with user options for age and missing cache
     _loading2 "Checking cache for ${ENDPOINT_NAME} data at $CACHE_FILE"
@@ -1046,8 +1435,22 @@ function _gp_api_list_sites () {
             # Server_name is under server->label
             DOMAINS=$(jq -r '.[] | "\(.id),\(.url),\(.server_id),\(.server.label),\(.is_ssl),\(.php_version),\(.multisites),\(.www),\(.root),\(.remote_bup),\(.local_bup),\(.nginx_caching)"' "$CACHE_FILE" | sort -u)
         else
-            # Default output with just label and id
-            DOMAINS=$(jq -r '.[] | .url' "$CACHE_FILE" | sort -u)
+            # Default output with site URL and primary domain
+            # If domain cache exists, show primary domain for each site
+            if [[ -f "$DOMAIN_CACHE_FILE" ]]; then
+                DOMAINS=$(jq -r --slurpfile domains "$DOMAIN_CACHE_FILE" '
+                    .[] | 
+                    .id as $site_id | 
+                    .url as $site_url |
+                    ([$domains[0][] | select(.site_id == $site_id and .type == "primary")] | first | .url // .domain_url // .name) as $primary |
+                    ([$domains[0][] | select(.site_id == $site_id)] | first | .url // .domain_url // .name) as $first_domain |
+                    if $primary then "\($site_url) → \($primary)"
+                    elif $first_domain then "\($site_url) → \($first_domain)"
+                    else $site_url end
+                ' "$CACHE_FILE" | sort -u)
+            else
+                DOMAINS=$(jq -r '.[] | .url' "$CACHE_FILE" | sort -u)
+            fi
         fi
         echo "$DOMAINS"
         # Total Domains
@@ -1240,6 +1643,20 @@ function _gp_api_get_site_formatted () {
         # Output this site's data
         printf "%-8s %-40s %-12s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
             "$id" "$url" "$is_ssl" "$ssl_status" "$server_id" "$servername" "$user_id" "$system_userid" "$nginx_caching"
+        
+        # Show domains associated with this site
+        local DOMAIN_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
+        if [[ -f "$DOMAIN_CACHE_FILE" ]]; then
+            local site_domains
+            site_domains=$(jq -r --arg sid "$id" '.[] | select(.site_id == ($sid | tonumber)) | "\(.type): \(.url // .domain_url // .name)"' "$DOMAIN_CACHE_FILE" 2>/dev/null)
+            if [[ -n "$site_domains" ]]; then
+                echo
+                echo "Domains:"
+                echo "$site_domains" | while read -r domain_line; do
+                    echo "  $domain_line"
+                done
+            fi
+        fi
     done
     
     return 0

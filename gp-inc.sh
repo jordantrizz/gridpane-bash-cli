@@ -130,6 +130,9 @@ _check_cache_with_options() {
                 "servers")
                     _gp_api_cache_servers
                     ;;
+                "domains")
+                    _gp_api_cache_domains
+                    ;;
                 *)
                     _error "Unknown cache type: ${cache_type}"
                     return 1
@@ -190,6 +193,9 @@ _check_cache_with_options() {
                 ;;
             "servers")
                 _gp_api_cache_servers
+                ;;
+            "domains")
+                _gp_api_cache_domains
                 ;;
             *)
                 _error "Unknown cache type: ${cache_type}"
