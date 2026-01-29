@@ -98,6 +98,8 @@
 
 ### Implementation Phases
 
+Sample data for testing: ./gp-site-mig.sh -d -s aroconsulting.ca -sp BOLDLAYOUT -dp CYBER
+
 #### Phase 1 - Script Skeleton and CLI Parsing ✅
 **Goal:** Create basic script structure with argument parsing and help text
 * [x] Create `gp-site-mig.sh` with shebang and source includes
@@ -135,17 +137,19 @@
 * [x] Implement `_run_step()` helper to handle step execution and resume logic
 
 **Test:** Run with valid site on both profiles; run with missing site (expect error)
+**Note:** Until Phase 4+ is implemented, the script should stop cleanly after Step 1.
 
-#### Phase 4 - Step 2 Implementation (Server Discovery & SSH)
+#### Phase 4 - Step 2 Implementation (Server Discovery & SSH) ✅
 **Goal:** Get server IPs and validate SSH connectivity
-* [ ] Implement `_step_2_1()` - Get server IPs from API, store to state
-* [ ] Implement `_step_2_2()` - Test SSH to both servers (`ssh -o ConnectTimeout=5 -o BatchMode=yes`)
-* [ ] Implement `_step_2_3()` - SSH to source, grep DB_NAME from wp-config.php
-* [ ] Implement `_step_2_4()` - SSH to both servers, verify database exists (`mysql -e "SHOW DATABASES LIKE 'dbname'"`)
-* [ ] Implement `_step_2_5()` - SSH to both servers, find site directory path, store to state
-* [ ] Implement wrapper `_step_2()` that calls all sub-steps
+* [x] Implement `_step_2_1()` - Resolve server IPs from server cache, store to state
+* [x] Implement `_step_2_2()` - Test SSH to both servers (`ssh -o ConnectTimeout=5 -o BatchMode=yes`)
+* [x] Implement `_step_2_3()` - SSH to both servers, extract DB_NAME from wp-config.php, store to state
+* [x] Implement `_step_2_4()` - SSH to both servers, verify database exists (`mysql -e "SHOW DATABASES LIKE 'dbname'"`)
+* [x] Implement `_step_2_5()` - SSH to both servers, find wp-config.php and store site/htdocs paths to state
+* [x] Implement wrapper `_step_2()` that calls all sub-steps
 
 **Test:** Run each sub-step individually with `--step 2.1`, etc.; verify state updates
+**Note:** Until Step 3+ is implemented, the script should stop cleanly after Step 2.
 
 #### Phase 5 - Step 3 Implementation (Rsync)
 **Goal:** Validate rsync and migrate files

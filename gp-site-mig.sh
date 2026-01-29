@@ -141,6 +141,15 @@ function _debug() {
     fi
 }
 
+function _debug_cmd() {
+    local label="$1"
+    shift
+    if [[ "$DEBUG" == "1" ]]; then
+        # Print as a single shell-ish line for copy/paste.
+        _debug "$label: $*"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # Logging function - writes timestamped entries to log file
 # -----------------------------------------------------------------------------
@@ -516,6 +525,10 @@ function _run_step() {
             _debug "Running requested step: $step_num"
             $step_func
             return $?
+        elif [[ "$RUN_STEP" != *.* && "$step_num" == "$RUN_STEP."* ]]; then
+            _debug "Running requested step group: $RUN_STEP (executing $step_num)"
+            $step_func
+            return $?
         else
             _debug "Skipping step $step_num (running step $RUN_STEP only)"
             return 0
@@ -525,6 +538,56 @@ function _run_step() {
     # Check if step already completed (for resume)
     if _state_is_step_completed "$step_num"; then
         _loading3 "Step $step_num already completed, skipping..."
+
+        if [[ "$step_num" == "1" ]]; then
+            local source_site_id source_site_url source_server_id source_server_label source_server_ip
+            local dest_site_id dest_site_url dest_server_id dest_server_label dest_server_ip
+
+            source_site_id=$(_state_read ".data.source_site_id")
+            source_site_url=$(_state_read ".data.source_site_url")
+            source_server_id=$(_state_read ".data.source_server_id")
+            source_server_label=$(_state_read ".data.source_server_label")
+            source_server_ip=$(_state_read ".data.source_server_ip")
+
+            dest_site_id=$(_state_read ".data.dest_site_id")
+            dest_site_url=$(_state_read ".data.dest_site_url")
+            dest_server_id=$(_state_read ".data.dest_server_id")
+            dest_server_label=$(_state_read ".data.dest_server_label")
+            dest_server_ip=$(_state_read ".data.dest_server_ip")
+
+            [[ -z "$source_site_url" ]] && source_site_url="$SITE"
+            [[ -z "$dest_site_url" ]] && dest_site_url="$SITE"
+            [[ -z "$source_site_id" ]] && source_site_id="UNKNOWN"
+            [[ -z "$dest_site_id" ]] && dest_site_id="UNKNOWN"
+            [[ -z "$source_server_id" ]] && source_server_id="UNKNOWN"
+            [[ -z "$dest_server_id" ]] && dest_server_id="UNKNOWN"
+            [[ -z "$source_server_label" ]] && source_server_label="UNKNOWN"
+            [[ -z "$dest_server_label" ]] && dest_server_label="UNKNOWN"
+            [[ -z "$source_server_ip" ]] && source_server_ip="UNKNOWN"
+            [[ -z "$dest_server_ip" ]] && dest_server_ip="UNKNOWN"
+
+            if [[ "$source_server_label" == "UNKNOWN" || "$source_server_ip" == "UNKNOWN" ]]; then
+                local source_server_cache
+                source_server_cache=$(_server_cache_file_for_profile "$SOURCE_PROFILE")
+                if [[ ! -f "$source_server_cache" ]]; then
+                    _loading3 "  Hint: ./gp-api.sh -p $SOURCE_PROFILE -c cache-servers"
+                fi
+            fi
+
+            if [[ "$dest_server_label" == "UNKNOWN" || "$dest_server_ip" == "UNKNOWN" ]]; then
+                local dest_server_cache
+                dest_server_cache=$(_server_cache_file_for_profile "$DEST_PROFILE")
+                if [[ ! -f "$dest_server_cache" ]]; then
+                    _loading3 "  Hint: ./gp-api.sh -p $DEST_PROFILE -c cache-servers"
+                fi
+            fi
+
+            _loading3 "  Source: $source_site_url (site_id=$source_site_id)"
+            _loading3 "    Server: $source_server_label (server_id=$source_server_id, ip=$source_server_ip)"
+            _loading3 "  Dest:   $dest_site_url (site_id=$dest_site_id)"
+            _loading3 "    Server: $dest_server_label (server_id=$dest_server_id, ip=$dest_server_ip)"
+        fi
+
         _log "Step $step_num skipped (already completed)"
         return 0
     fi
@@ -532,6 +595,596 @@ function _run_step() {
     # Run the step
     $step_func
     return $?
+}
+
+# -----------------------------------------------------------------------------
+# Step 2.1 - Get server IPs from cache
+# Requires Step 1 (server IDs) and profile server caches
+# Stores: source_server_ip, dest_server_ip (and re-stores labels if available)
+# -----------------------------------------------------------------------------
+function _step_2_1() {
+    _loading "Step 2.1: Resolving server IPs"
+    _log "STEP 2.1: Resolving server IPs"
+
+    local source_server_id dest_server_id
+    source_server_id=$(_state_read ".data.source_server_id")
+    dest_server_id=$(_state_read ".data.dest_server_id")
+
+    if [[ -z "$source_server_id" || -z "$dest_server_id" ]]; then
+        _error "Missing server IDs in state. Run Step 1 first."
+        _log "STEP 2.1 FAILED: Missing server IDs in state"
+        return 1
+    fi
+
+    local source_server_cache dest_server_cache
+    source_server_cache=$(_server_cache_file_for_profile "$SOURCE_PROFILE")
+    dest_server_cache=$(_server_cache_file_for_profile "$DEST_PROFILE")
+
+    if [[ ! -f "$source_server_cache" ]]; then
+        _error "Server cache not found for source profile '$SOURCE_PROFILE'"
+        _error "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-servers"
+        _log "STEP 2.1 FAILED: Missing source server cache"
+        return 1
+    fi
+
+    if [[ ! -f "$dest_server_cache" ]]; then
+        _error "Server cache not found for destination profile '$DEST_PROFILE'"
+        _error "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-servers"
+        _log "STEP 2.1 FAILED: Missing destination server cache"
+        return 1
+    fi
+
+    local source_server_label source_server_ip dest_server_label dest_server_ip
+    source_server_label=$(_resolve_server_label_for_profile "$SOURCE_PROFILE" "$source_server_id")
+    source_server_ip=$(_resolve_server_ip_for_profile "$SOURCE_PROFILE" "$source_server_id")
+    dest_server_label=$(_resolve_server_label_for_profile "$DEST_PROFILE" "$dest_server_id")
+    dest_server_ip=$(_resolve_server_ip_for_profile "$DEST_PROFILE" "$dest_server_id")
+
+    if [[ -z "$source_server_ip" || "$source_server_ip" == "UNKNOWN" ]]; then
+        _error "Could not resolve source server IP (server_id=$source_server_id)"
+        _log "STEP 2.1 FAILED: Could not resolve source server IP"
+        return 1
+    fi
+
+    if [[ -z "$dest_server_ip" || "$dest_server_ip" == "UNKNOWN" ]]; then
+        _error "Could not resolve destination server IP (server_id=$dest_server_id)"
+        _log "STEP 2.1 FAILED: Could not resolve destination server IP"
+        return 1
+    fi
+
+    _success "Resolved source server: ${source_server_label:-UNKNOWN} ($source_server_ip)"
+    _success "Resolved dest server:   ${dest_server_label:-UNKNOWN} ($dest_server_ip)"
+
+    _state_write ".data.source_server_ip" "$source_server_ip"
+    _state_write ".data.dest_server_ip" "$dest_server_ip"
+    [[ -n "$source_server_label" ]] && _state_write ".data.source_server_label" "$source_server_label"
+    [[ -n "$dest_server_label" ]] && _state_write ".data.dest_server_label" "$dest_server_label"
+
+    _state_add_completed_step "2.1"
+    _log "STEP 2.1 COMPLETE: Server IPs resolved"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 2.2 - Test SSH connectivity
+# Requires Step 2.1 (server IPs)
+# -----------------------------------------------------------------------------
+function _step_2_2() {
+    _loading "Step 2.2: Testing SSH connectivity"
+    _log "STEP 2.2: Testing SSH connectivity"
+
+    local source_server_ip dest_server_ip
+    source_server_ip=$(_state_read ".data.source_server_ip")
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+
+    if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
+        _error "Missing server IPs in state. Run Step 2.1 first."
+        _log "STEP 2.2 FAILED: Missing server IPs in state"
+        return 1
+    fi
+
+    local ssh_user
+    ssh_user="${GPBC_SSH_USER:-root}"
+    local known_hosts_file
+    known_hosts_file="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
+    mkdir -p "$STATE_DIR"
+    local ssh_opts
+    ssh_opts=( -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts_file" )
+
+    _loading2 "Testing SSH to source: $ssh_user@$source_server_ip"
+    local ssh_err
+    local ssh_rc
+    ssh_err=$(ssh "${ssh_opts[@]}" "$ssh_user@$source_server_ip" "echo ok" 2>&1 >/dev/null)
+    ssh_rc=$?
+    if [[ $ssh_rc -ne 0 ]]; then
+        if echo "$ssh_err" | grep -qi "Bad configuration option"; then
+            _debug "SSH client does not support accept-new; retrying with StrictHostKeyChecking=no"
+            ssh_opts=( -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile="$known_hosts_file" )
+            ssh_err=$(ssh "${ssh_opts[@]}" "$ssh_user@$source_server_ip" "echo ok" 2>&1 >/dev/null)
+            ssh_rc=$?
+        fi
+    fi
+
+    if [[ $ssh_rc -ne 0 ]]; then
+        _error "SSH failed to source server: $ssh_user@$source_server_ip"
+        _loading3 "Hint: verify auth with 'ssh $ssh_user@$source_server_ip'"
+        _debug "SSH error (source): $ssh_err"
+        _log "STEP 2.2 FAILED: SSH to source failed"
+        return 1
+    fi
+    [[ -n "$ssh_err" ]] && _debug "SSH stderr (source): $ssh_err"
+    _success "SSH OK: source ($source_server_ip)"
+
+    _loading2 "Testing SSH to destination: $ssh_user@$dest_server_ip"
+    ssh_err=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "echo ok" 2>&1 >/dev/null)
+    ssh_rc=$?
+    if [[ $ssh_rc -ne 0 ]]; then
+        if echo "$ssh_err" | grep -qi "Bad configuration option"; then
+            _debug "SSH client does not support accept-new; retrying with StrictHostKeyChecking=no"
+            ssh_opts=( -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile="$known_hosts_file" )
+            ssh_err=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "echo ok" 2>&1 >/dev/null)
+            ssh_rc=$?
+        fi
+    fi
+
+    if [[ $ssh_rc -ne 0 ]]; then
+        _error "SSH failed to destination server: $ssh_user@$dest_server_ip"
+        _loading3 "Hint: verify auth with 'ssh $ssh_user@$dest_server_ip'"
+        _debug "SSH error (dest): $ssh_err"
+        _log "STEP 2.2 FAILED: SSH to destination failed"
+        return 1
+    fi
+    [[ -n "$ssh_err" ]] && _debug "SSH stderr (dest): $ssh_err"
+    _success "SSH OK: destination ($dest_server_ip)"
+
+    _state_write ".data.ssh_user" "$ssh_user"
+    _state_add_completed_step "2.2"
+    _log "STEP 2.2 COMPLETE: SSH connectivity validated"
+    echo
+    return 0
+}
+
+function _ssh_run() {
+    local host_ip="$1"
+    local remote_cmd="$2"
+
+    local ssh_user
+    ssh_user="${GPBC_SSH_USER:-$(_state_read ".data.ssh_user")}";
+    [[ -z "$ssh_user" ]] && ssh_user="root"
+
+    local known_hosts_file
+    known_hosts_file="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
+    mkdir -p "$STATE_DIR"
+
+    local ssh_opts
+    ssh_opts=( -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts_file" )
+
+    _debug_cmd "SSH" ssh ${ssh_opts[*]} "$ssh_user@$host_ip" "$remote_cmd"
+
+    ssh "${ssh_opts[@]}" "$ssh_user@$host_ip" "$remote_cmd"
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        # Fallback for older SSH clients that don't support accept-new
+        local out
+        out=$(ssh "${ssh_opts[@]}" "$ssh_user@$host_ip" "$remote_cmd" 2>&1 >/dev/null)
+        if echo "$out" | grep -qi "Bad configuration option"; then
+            ssh_opts=( -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile="$known_hosts_file" )
+            _debug_cmd "SSH (fallback StrictHostKeyChecking=no)" ssh ${ssh_opts[*]} "$ssh_user@$host_ip" "$remote_cmd"
+            ssh "${ssh_opts[@]}" "$ssh_user@$host_ip" "$remote_cmd"
+            return $?
+        fi
+    fi
+    return $rc
+}
+
+function _ssh_capture() {
+    local host_ip="$1"
+    local remote_cmd="$2"
+
+    local ssh_user
+    ssh_user="${GPBC_SSH_USER:-$(_state_read ".data.ssh_user")}";
+    [[ -z "$ssh_user" ]] && ssh_user="root"
+
+    local known_hosts_file
+    known_hosts_file="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
+    mkdir -p "$STATE_DIR"
+
+    local ssh_opts
+    ssh_opts=( -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts_file" )
+
+    local tmp_err
+    tmp_err=$(mktemp)
+    local out err rc
+
+    _debug_cmd "SSH (capture)" ssh ${ssh_opts[*]} "$ssh_user@$host_ip" "$remote_cmd"
+    out=$(ssh "${ssh_opts[@]}" "$ssh_user@$host_ip" "$remote_cmd" 2>"$tmp_err")
+    rc=$?
+    err=$(cat "$tmp_err" || true)
+
+    if echo "$err" | grep -qi "Bad configuration option"; then
+        ssh_opts=( -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile="$known_hosts_file" )
+        _debug_cmd "SSH (capture fallback StrictHostKeyChecking=no)" ssh ${ssh_opts[*]} "$ssh_user@$host_ip" "$remote_cmd"
+        out=$(ssh "${ssh_opts[@]}" "$ssh_user@$host_ip" "$remote_cmd" 2>"$tmp_err")
+        rc=$?
+        err=$(cat "$tmp_err" || true)
+    fi
+
+    rm -f "$tmp_err" || true
+    [[ -n "$err" ]] && _debug "SSH stderr ($ssh_user@$host_ip): $err"
+
+    printf "%s" "$out"
+    return $rc
+}
+
+function _remote_find_wp_config() {
+    local host_ip="$1"
+    local site_domain="$2"
+
+    local cmd
+        cmd=$(cat <<'EOF'
+bash -lc 'set -euo pipefail
+site="$1"
+dbg="$2"
+
+for f in \
+    "/var/www/${site}/htdocs/wp-config.php" \
+    "/var/www/${site}/wp-config.php" \
+    "/var/www/www.${site}/htdocs/wp-config.php" \
+    "/var/www/www.${site}/wp-config.php" \
+    "/home"/*"/sites/${site}/htdocs/wp-config.php" \
+    "/home"/*"/sites/${site}/wp-config.php" \
+    "/home"/*"/sites/www.${site}/htdocs/wp-config.php" \
+    "/home"/*"/sites/www.${site}/wp-config.php" \
+    ; do
+    if [[ -f "$f" ]]; then
+        echo "$f"
+        exit 0
+    fi
+done
+
+# Bounded find fallback (avoid scanning entire filesystem)
+found=$(find /var/www -maxdepth 5 -type f -name wp-config.php -path "*/${site}/*" 2>/dev/null | head -n1 || true)
+if [[ -n "$found" && -f "$found" ]]; then
+    echo "$found"
+    exit 0
+fi
+
+found=$(find /home -maxdepth 6 -type f -name wp-config.php -path "*/${site}/*" 2>/dev/null | head -n1 || true)
+if [[ -n "$found" && -f "$found" ]]; then
+    echo "$found"
+    exit 0
+fi
+
+if [[ "$dbg" == "1" ]]; then
+    echo "--- DEBUG: wp-config not found for site='$site' ---"
+    echo "PWD: $(pwd)"
+    echo "HOSTNAME: $(hostname)"
+    echo "Dirs in /var/www (top 100):"
+    ls -1 /var/www 2>/dev/null | head -n 100 | sed "s/^/  /" || true
+    echo "Find wp-config.php under /var/www (top 30):"
+    find /var/www -maxdepth 6 -type f -name wp-config.php 2>/dev/null | head -n 30 | sed "s/^/  /" || true
+    echo "Find wp-config.php under /home (top 30):"
+    find /home -maxdepth 8 -type f -name wp-config.php 2>/dev/null | head -n 30 | sed "s/^/  /" || true
+    echo "--- END DEBUG ---"
+fi
+
+exit 1' --
+EOF
+)
+        cmd="${cmd%$'\n'}"
+
+        # Append args for the remote script
+        cmd="$cmd '$site_domain' '$DEBUG'"
+
+    _ssh_capture "$host_ip" "$cmd"
+    return $?
+}
+
+# -----------------------------------------------------------------------------
+# Step 2.5 - Confirm site paths (source and destination)
+# Finds wp-config.php, derives htdocs + site path, stores them in state.
+# -----------------------------------------------------------------------------
+function _step_2_5() {
+    _loading "Step 2.5: Confirming site directory paths"
+    _log "STEP 2.5: Confirming site directory paths"
+
+    local source_server_ip dest_server_ip
+    source_server_ip=$(_state_read ".data.source_server_ip")
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+
+    if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
+        _error "Missing server IPs in state. Run Step 2.1 first."
+        _log "STEP 2.5 FAILED: Missing server IPs in state"
+        return 1
+    fi
+
+    _loading2 "Locating wp-config.php on source..."
+    local source_wp_config source_wp_rc
+    source_wp_config=$(_remote_find_wp_config "$source_server_ip" "$SITE")
+    source_wp_rc=$?
+    if [[ $source_wp_rc -ne 0 ]]; then
+        [[ -n "$source_wp_config" ]] && _debug "Source wp-config debug:\n$source_wp_config"
+        _error "Could not locate wp-config.php on source server ($source_server_ip)"
+        _log "STEP 2.5 FAILED: wp-config not found on source"
+        return 1
+    fi
+
+    # Safety check: ensure output looks like a wp-config path
+    if [[ "$source_wp_config" != /*wp-config.php ]]; then
+        _debug "Unexpected source wp-config output: $source_wp_config"
+        _error "Unexpected output while locating wp-config.php on source"
+        _log "STEP 2.5 FAILED: Unexpected source wp-config output"
+        return 1
+    fi
+
+    _loading2 "Locating wp-config.php on destination..."
+    local dest_wp_config dest_wp_rc
+    dest_wp_config=$(_remote_find_wp_config "$dest_server_ip" "$SITE")
+    dest_wp_rc=$?
+    if [[ $dest_wp_rc -ne 0 ]]; then
+        [[ -n "$dest_wp_config" ]] && _debug "Dest wp-config debug:\n$dest_wp_config"
+        _error "Could not locate wp-config.php on destination server ($dest_server_ip)"
+        _log "STEP 2.5 FAILED: wp-config not found on destination"
+        return 1
+    fi
+
+    if [[ "$dest_wp_config" != /*wp-config.php ]]; then
+        _debug "Unexpected dest wp-config output: $dest_wp_config"
+        _error "Unexpected output while locating wp-config.php on destination"
+        _log "STEP 2.5 FAILED: Unexpected dest wp-config output"
+        return 1
+    fi
+
+    local source_htdocs_path source_site_path dest_htdocs_path dest_site_path
+    source_htdocs_path=$(dirname "$source_wp_config")
+    dest_htdocs_path=$(dirname "$dest_wp_config")
+    if [[ "$source_wp_config" == */htdocs/wp-config.php ]]; then
+        source_site_path="${source_htdocs_path%/htdocs}"
+    else
+        source_site_path="$source_htdocs_path"
+    fi
+    if [[ "$dest_wp_config" == */htdocs/wp-config.php ]]; then
+        dest_site_path="${dest_htdocs_path%/htdocs}"
+    else
+        dest_site_path="$dest_htdocs_path"
+    fi
+
+    _success "Source wp-config: $source_wp_config"
+    _loading3 "  Source htdocs: $source_htdocs_path"
+    _loading3 "  Source site:   $source_site_path"
+    _success "Dest wp-config:   $dest_wp_config"
+    _loading3 "  Dest htdocs:   $dest_htdocs_path"
+    _loading3 "  Dest site:     $dest_site_path"
+
+    _state_write ".data.source_wp_config_path" "$source_wp_config"
+    _state_write ".data.source_htdocs_path" "$source_htdocs_path"
+    _state_write ".data.source_site_path" "$source_site_path"
+    _state_write ".data.dest_wp_config_path" "$dest_wp_config"
+    _state_write ".data.dest_htdocs_path" "$dest_htdocs_path"
+    _state_write ".data.dest_site_path" "$dest_site_path"
+
+    _state_add_completed_step "2.5"
+    _log "STEP 2.5 COMPLETE: Site paths confirmed"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 2.3 - Get database name from wp-config.php
+# Requires Step 2.5 (wp-config path)
+# Stores: source_db_name, dest_db_name, db_name (canonical)
+# -----------------------------------------------------------------------------
+function _step_2_3() {
+    _loading "Step 2.3: Reading DB_NAME from wp-config.php"
+    _log "STEP 2.3: Reading DB_NAME from wp-config.php"
+
+    local source_server_ip dest_server_ip
+    source_server_ip=$(_state_read ".data.source_server_ip")
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+    local source_wp_config dest_wp_config
+    source_wp_config=$(_state_read ".data.source_wp_config_path")
+    dest_wp_config=$(_state_read ".data.dest_wp_config_path")
+
+    if [[ -z "$source_wp_config" || -z "$dest_wp_config" ]]; then
+        _error "Missing wp-config paths in state. Run Step 2.5 first."
+        _log "STEP 2.3 FAILED: Missing wp-config paths"
+        return 1
+    fi
+
+    local cmd
+    cmd=$(cat <<'EOF'
+bash -lc 'set -euo pipefail
+f="$1"
+dbg="${2:-0}"
+db=""
+
+# Extract DB_NAME from define(DB_NAME, value) lines (single- or double-quoted).
+sq=$(printf "%b" "\\047")
+dq=$(printf "%b" "\\042")
+line=$(grep -m1 "DB_NAME" "$f" 2>/dev/null || true)
+if [[ -n "$line" ]]; then
+    if [[ "$dbg" == "1" ]]; then
+        echo "DBG: line=$line" >&2
+        echo -n "DBG: sq bytes:" >&2
+        printf "%s" "$sq" | od -An -t u1 >&2 || true
+        echo -n "DBG: dq bytes:" >&2
+        printf "%s" "$dq" | od -An -t u1 >&2 || true
+    fi
+    if echo "$line" | grep -q "$sq"; then
+        [[ "$dbg" == "1" ]] && echo "DBG: using sq cut" >&2
+        db=$(printf "%s" "$line" | cut -d"$sq" -f4)
+    elif echo "$line" | grep -q "$dq"; then
+        [[ "$dbg" == "1" ]] && echo "DBG: using dq cut" >&2
+        db=$(printf "%s" "$line" | cut -d"$dq" -f4)
+    else
+        [[ "$dbg" == "1" ]] && echo "DBG: no quote delimiter matched" >&2
+    fi
+    [[ "$dbg" == "1" ]] && echo "DBG: extracted db=$db" >&2
+fi
+
+echo -n "$db"' --
+EOF
+)
+    cmd="${cmd%$'\n'}"
+
+    local source_db dest_db
+    source_db=$(_ssh_capture "$source_server_ip" "$cmd '$source_wp_config' '$DEBUG'")
+    if [[ -z "$source_db" ]]; then
+        if [[ "$DEBUG" == "1" ]]; then
+            local dbg_cmd dbg_out
+            dbg_cmd=$(cat <<'EOF'
+bash -lc 'set -euo pipefail
+f="$1"
+echo "--- DEBUG: source wp-config DB_NAME extraction ---"
+ls -la "$f" || true
+echo "--- grep DB_NAME (top 30) ---"
+grep -n "DB_NAME" "$f" 2>/dev/null | head -n 30 || true
+echo "--- grep define (top 30) ---"
+grep -n "define" "$f" 2>/dev/null | head -n 30 || true
+echo "--- END DEBUG ---"' --
+EOF
+)
+            dbg_cmd="${dbg_cmd%$'\n'}"
+            dbg_out=$(_ssh_capture "$source_server_ip" "$dbg_cmd '$source_wp_config'")
+            [[ -n "$dbg_out" ]] && _debug "$dbg_out"
+        fi
+        _error "Could not extract DB_NAME from source wp-config ($source_wp_config)"
+        _log "STEP 2.3 FAILED: Could not extract source DB_NAME"
+        return 1
+    fi
+
+    dest_db=$(_ssh_capture "$dest_server_ip" "$cmd '$dest_wp_config' '$DEBUG'")
+    if [[ -z "$dest_db" ]]; then
+        if [[ "$DEBUG" == "1" ]]; then
+            local dbg_cmd dbg_out
+            dbg_cmd=$(cat <<'EOF'
+bash -lc 'set -euo pipefail
+f="$1"
+echo "--- DEBUG: destination wp-config DB_NAME extraction ---"
+ls -la "$f" || true
+echo "--- grep DB_NAME (top 30) ---"
+grep -n "DB_NAME" "$f" 2>/dev/null | head -n 30 || true
+echo "--- grep define (top 30) ---"
+grep -n "define" "$f" 2>/dev/null | head -n 30 || true
+echo "--- END DEBUG ---"' --
+EOF
+)
+            dbg_cmd="${dbg_cmd%$'\n'}"
+            dbg_out=$(_ssh_capture "$dest_server_ip" "$dbg_cmd '$dest_wp_config'")
+            [[ -n "$dbg_out" ]] && _debug "$dbg_out"
+        fi
+        _error "Could not extract DB_NAME from destination wp-config ($dest_wp_config)"
+        _log "STEP 2.3 FAILED: Could not extract destination DB_NAME"
+        return 1
+    fi
+
+    _success "Source DB_NAME: $source_db"
+    _success "Dest DB_NAME:   $dest_db"
+    if [[ "$source_db" != "$dest_db" ]]; then
+        _warning "DB_NAME differs between source and destination"
+    fi
+
+    _state_write ".data.source_db_name" "$source_db"
+    _state_write ".data.dest_db_name" "$dest_db"
+    _state_write ".data.db_name" "$source_db"
+
+    _state_add_completed_step "2.3"
+    _log "STEP 2.3 COMPLETE: DB_NAME extracted"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 2.4 - Confirm database exists on both servers
+# Requires Step 2.3
+# -----------------------------------------------------------------------------
+function _step_2_4() {
+    _loading "Step 2.4: Confirming database exists"
+    _log "STEP 2.4: Confirming database exists"
+
+    local source_server_ip dest_server_ip
+    source_server_ip=$(_state_read ".data.source_server_ip")
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+    local source_db dest_db
+    source_db=$(_state_read ".data.source_db_name")
+    dest_db=$(_state_read ".data.dest_db_name")
+
+    if [[ -z "$source_db" || -z "$dest_db" ]]; then
+        _error "Missing DB names in state. Run Step 2.3 first."
+        _log "STEP 2.4 FAILED: Missing DB names"
+        return 1
+    fi
+
+    local check_cmd
+    check_cmd=$(cat <<'EOF'
+bash -lc 'set -euo pipefail
+db="$1"
+if ! command -v mysql >/dev/null 2>&1; then
+  echo "NO_MYSQL"
+  exit 2
+fi
+
+# Build query with single quotes without embedding literal single quotes in this script.
+sq=$(printf "%b" "\\047")
+q="SHOW DATABASES LIKE ${sq}${db}${sq}"
+mysql -N -e "$q" 2>/dev/null | head -n1' --
+EOF
+)
+    check_cmd="${check_cmd%$'\n'}"
+
+    local out
+    _loading2 "Checking source DB exists: $source_db"
+    out=$(_ssh_capture "$source_server_ip" "$check_cmd '$source_db'")
+    if [[ "$out" == "NO_MYSQL" ]]; then
+        _error "mysql client not found on source server"
+        _log "STEP 2.4 FAILED: mysql client not found on source"
+        return 1
+    fi
+    if [[ "$out" != "$source_db" ]]; then
+        _error "Database not found on source server: $source_db"
+        _log "STEP 2.4 FAILED: Source DB missing"
+        return 1
+    fi
+    _success "Source DB exists"
+
+    _loading2 "Checking destination DB exists: $dest_db"
+    out=$(_ssh_capture "$dest_server_ip" "$check_cmd '$dest_db'")
+    if [[ "$out" == "NO_MYSQL" ]]; then
+        _error "mysql client not found on destination server"
+        _log "STEP 2.4 FAILED: mysql client not found on destination"
+        return 1
+    fi
+    if [[ "$out" != "$dest_db" ]]; then
+        _error "Database not found on destination server: $dest_db"
+        _log "STEP 2.4 FAILED: Destination DB missing"
+        return 1
+    fi
+    _success "Destination DB exists"
+
+    _state_add_completed_step "2.4"
+    _log "STEP 2.4 COMPLETE: Databases exist"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 2 - Wrapper that calls all sub-steps
+# This can be called directly or each sub-step can be run individually
+# -----------------------------------------------------------------------------
+function _step_2() {
+    _loading "Step 2: Server Discovery and SSH Validation"
+    _log "STEP 2: Starting server discovery and SSH validation"
+
+    _step_2_1 || return 1
+    _step_2_2 || return 1
+    _step_2_5 || return 1
+    _step_2_3 || return 1
+    _step_2_4 || return 1
+
+    _state_add_completed_step "2"
+    _log "STEP 2 COMPLETE: Server discovery and SSH validation done"
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -668,7 +1321,6 @@ else
 fi
 
 echo
-_success "Phase 2 complete - logging and state management ready"
 _verbose "Log file: $LOG_FILE"
 _verbose "State file: $STATE_FILE"
 
@@ -693,16 +1345,54 @@ if ! _run_step "1" _step_1; then
     exit 1
 fi
 
-# TODO: Implement remaining migration steps
-# Step 2-7 functions should be added and called here
-echo
-_warning "Steps 2-7 not yet implemented."
-_loading3 "The following steps need to be added:"
-echo "  Step 2: Server discovery and SSH validation"
-echo "  Step 3: Test rsync and migrate files"
-echo "  Step 4: Migrate database"
-echo "  Step 5: Migrate nginx config"
-echo "  Step 6: Copy user-config.php (if exists)"
-echo "  Step 7: Final steps (clear cache, print summary)"
-echo
-_log "Migration paused - Steps 2-7 not yet implemented"
+# Step 2.1: Resolve server IPs
+if ! _run_step "2.1" _step_2_1; then
+    _error "Migration failed at Step 2.1"
+    _log "Migration FAILED at Step 2.1"
+    exit 1
+fi
+
+# Step 2.2: Test SSH connectivity
+if ! _run_step "2.2" _step_2_2; then
+    _error "Migration failed at Step 2.2"
+    _log "Migration FAILED at Step 2.2"
+    exit 1
+fi
+
+# Step 2.5: Confirm site directory paths
+if ! _run_step "2.5" _step_2_5; then
+    _error "Migration failed at Step 2.5"
+    _log "Migration FAILED at Step 2.5"
+    exit 1
+fi
+
+# Step 2.3: Get database name from wp-config.php
+if ! _run_step "2.3" _step_2_3; then
+    _error "Migration failed at Step 2.3"
+    _log "Migration FAILED at Step 2.3"
+    exit 1
+fi
+
+# Step 2.4: Confirm database exists
+if ! _run_step "2.4" _step_2_4; then
+    _error "Migration failed at Step 2.4"
+    _log "Migration FAILED at Step 2.4"
+    exit 1
+fi
+
+# Stop after the last implemented step.
+# If a specific step was requested and it's not implemented, fail clearly.
+if [[ -n "$RUN_STEP" ]]; then
+    case "$RUN_STEP" in
+        1|2|2.1|2.2|2.3|2.4|2.5)
+            ;;
+        *)
+            _error "Requested step '$RUN_STEP' is not implemented yet"
+            _log "Migration FAILED: Requested step '$RUN_STEP' not implemented"
+            exit 1
+            ;;
+    esac
+fi
+
+_log "Stopping after Step 2.5 (remaining steps not implemented yet)"
+exit 0
