@@ -12,6 +12,7 @@ source "$SCRIPT_DIR/gp-inc-api.sh"
 # Migration-specific globals
 DRY_RUN="0"
 VERBOSE="0"
+DEBUG="0"
 RUN_STEP=""
 SITE=""
 SOURCE_PROFILE=""
@@ -35,6 +36,7 @@ function _usage() {
     echo "Options:"
     echo "  -n,  --dry-run                  Show what would be done without executing"
     echo "  -v,  --verbose                  Show detailed output"
+    echo "  -d,  --debug                    Enable debug output"
     echo "  --step <step>                   Run a specific step only (e.g., 3 or 2.1)"
     echo "  -h,  --help                     Show this help message"
     echo
@@ -127,6 +129,15 @@ function _verbose() {
 function _dry_run_msg() {
     if [[ "$DRY_RUN" == "1" ]]; then
         echo -e "\033[0;33m[DRY-RUN]\033[0m $1"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Debug output helper
+# -----------------------------------------------------------------------------
+function _debug() {
+    if [[ "$DEBUG" == "1" ]]; then
+        echo -e "\033[0;35m[DEBUG]\033[0m $1" >&2
     fi
 }
 
@@ -272,6 +283,257 @@ function _check_resume() {
     # If --step is specified with existing state, just continue (state already exists)
 }
 
+# =============================================================================
+# Migration Step Functions
+# =============================================================================
+
+function _server_cache_file_for_profile() {
+    local profile_name="$1"
+    echo "${CACHE_DIR}/${profile_name}_server.json"
+}
+
+function _resolve_server_label_for_profile() {
+    local profile_name="$1"
+    local server_id="$2"
+
+    local cache_file
+    cache_file=$(_server_cache_file_for_profile "$profile_name")
+
+    if [[ -z "$server_id" || "$server_id" == "null" ]]; then
+        echo "UNKNOWN"
+        return 0
+    fi
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "UNKNOWN"
+        return 0
+    fi
+
+    jq --arg server_id "$server_id" -r '.[] | select(.id == (($server_id | tonumber)? // -1)) | .label // empty' "$cache_file" 2>/dev/null | head -n1
+}
+
+function _resolve_server_ip_for_profile() {
+    local profile_name="$1"
+    local server_id="$2"
+
+    local cache_file
+    cache_file=$(_server_cache_file_for_profile "$profile_name")
+
+    if [[ -z "$server_id" || "$server_id" == "null" ]]; then
+        echo "UNKNOWN"
+        return 0
+    fi
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "UNKNOWN"
+        return 0
+    fi
+
+    jq --arg server_id "$server_id" -r '.[] | select(.id == (($server_id | tonumber)? // -1)) | .ip // empty' "$cache_file" 2>/dev/null | head -n1
+}
+
+# -----------------------------------------------------------------------------
+# Step 1 - Validate Input
+# Confirm site exists on both source and destination profiles via API
+# Stores: source_site_id, source_server_id, source_system_user_id,
+#         dest_site_id, dest_server_id, dest_system_user_id
+# -----------------------------------------------------------------------------
+function _step_1() {
+    _loading "Step 1: Validating input"
+    _log "STEP 1: Starting input validation"
+    
+    # Save current profile state
+    local saved_token="$GPBC_TOKEN"
+    local saved_token_name="$GPBC_TOKEN_NAME"
+    
+    # --- Source Profile ---
+    _loading2 "Checking source profile: $SOURCE_PROFILE"
+    _debug "Switching to source profile: $SOURCE_PROFILE"
+    
+    if ! _gp_set_profile_silent "$SOURCE_PROFILE"; then
+        _error "Source profile not found: $SOURCE_PROFILE"
+        _log "STEP 1 FAILED: Source profile not found: $SOURCE_PROFILE"
+        return 1
+    fi
+    
+    # Check for site cache
+    local source_cache="${CACHE_DIR}/${SOURCE_PROFILE}_site.json"
+    _debug "Source cache file: $source_cache"
+    
+    if [[ ! -f "$source_cache" ]]; then
+        _error "Site cache not found for source profile '$SOURCE_PROFILE'"
+        _error "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-sites"
+        _log "STEP 1 FAILED: Source site cache not found"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
+    fi
+    
+    # Find site in source cache
+    local source_site_data
+    source_site_data=$(jq --arg domain "$SITE" '.[] | select(.url == $domain)' "$source_cache" 2>/dev/null)
+    
+    if [[ -z "$source_site_data" || "$source_site_data" == "null" ]]; then
+        _error "Site '$SITE' not found in source profile '$SOURCE_PROFILE'"
+        _log "STEP 1 FAILED: Site not found in source profile"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
+    fi
+    
+    # Extract source site data
+    local source_site_id source_site_url source_server_id source_system_user_id
+    source_site_id=$(echo "$source_site_data" | jq -r '.id')
+    source_site_url=$(echo "$source_site_data" | jq -r '.url')
+    source_server_id=$(echo "$source_site_data" | jq -r '.server_id')
+    source_system_user_id=$(echo "$source_site_data" | jq -r '.system_user_id // "null"')
+
+    local source_server_label source_server_ip
+    source_server_label=$(_resolve_server_label_for_profile "$SOURCE_PROFILE" "$source_server_id")
+    source_server_ip=$(_resolve_server_ip_for_profile "$SOURCE_PROFILE" "$source_server_id")
+
+    if [[ "$source_server_label" == "UNKNOWN" ]]; then
+        _warning "Server cache missing for '$SOURCE_PROFILE' (cannot resolve server label)."
+        _loading3 "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-servers"
+        _log "STEP 1: Server cache missing for profile $SOURCE_PROFILE"
+    fi
+    
+    _debug "Source site_id: $source_site_id"
+    _debug "Source site_url: $source_site_url"
+    _debug "Source server_id: $source_server_id"
+    _debug "Source server_label: $source_server_label"
+    _debug "Source server_ip: $source_server_ip"
+    _debug "Source system_user_id: $source_system_user_id"
+    
+    _success "Found site on source: $source_site_url (site_id=$source_site_id)"
+    _loading3 "  Source server: $source_server_label (server_id=$source_server_id, ip=$source_server_ip)"
+    _log "Source site found: url=$source_site_url, id=$source_site_id, server_id=$source_server_id, server_label=$source_server_label, server_ip=$source_server_ip, system_user_id=$source_system_user_id"
+    
+    # --- Destination Profile ---
+    _loading2 "Checking destination profile: $DEST_PROFILE"
+    _debug "Switching to destination profile: $DEST_PROFILE"
+    
+    if ! _gp_set_profile_silent "$DEST_PROFILE"; then
+        _error "Destination profile not found: $DEST_PROFILE"
+        _log "STEP 1 FAILED: Destination profile not found: $DEST_PROFILE"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
+    fi
+    
+    # Check for site cache
+    local dest_cache="${CACHE_DIR}/${DEST_PROFILE}_site.json"
+    _debug "Destination cache file: $dest_cache"
+    
+    if [[ ! -f "$dest_cache" ]]; then
+        _error "Site cache not found for destination profile '$DEST_PROFILE'"
+        _error "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-sites"
+        _log "STEP 1 FAILED: Destination site cache not found"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
+    fi
+    
+    # Find site in destination cache
+    local dest_site_data
+    dest_site_data=$(jq --arg domain "$SITE" '.[] | select(.url == $domain)' "$dest_cache" 2>/dev/null)
+    
+    if [[ -z "$dest_site_data" || "$dest_site_data" == "null" ]]; then
+        _error "Site '$SITE' not found in destination profile '$DEST_PROFILE'"
+        _log "STEP 1 FAILED: Site not found in destination profile"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
+    fi
+    
+    # Extract destination site data
+    local dest_site_id dest_site_url dest_server_id dest_system_user_id
+    dest_site_id=$(echo "$dest_site_data" | jq -r '.id')
+    dest_site_url=$(echo "$dest_site_data" | jq -r '.url')
+    dest_server_id=$(echo "$dest_site_data" | jq -r '.server_id')
+    dest_system_user_id=$(echo "$dest_site_data" | jq -r '.system_user_id // "null"')
+
+    local dest_server_label dest_server_ip
+    dest_server_label=$(_resolve_server_label_for_profile "$DEST_PROFILE" "$dest_server_id")
+    dest_server_ip=$(_resolve_server_ip_for_profile "$DEST_PROFILE" "$dest_server_id")
+
+    if [[ "$dest_server_label" == "UNKNOWN" ]]; then
+        _warning "Server cache missing for '$DEST_PROFILE' (cannot resolve server label)."
+        _loading3 "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-servers"
+        _log "STEP 1: Server cache missing for profile $DEST_PROFILE"
+    fi
+    
+    _debug "Dest site_id: $dest_site_id"
+    _debug "Dest site_url: $dest_site_url"
+    _debug "Dest server_id: $dest_server_id"
+    _debug "Dest server_label: $dest_server_label"
+    _debug "Dest server_ip: $dest_server_ip"
+    _debug "Dest system_user_id: $dest_system_user_id"
+    
+    _success "Found site on destination: $dest_site_url (site_id=$dest_site_id)"
+    _loading3 "  Dest server: $dest_server_label (server_id=$dest_server_id, ip=$dest_server_ip)"
+    _log "Destination site found: url=$dest_site_url, id=$dest_site_id, server_id=$dest_server_id, server_label=$dest_server_label, server_ip=$dest_server_ip, system_user_id=$dest_system_user_id"
+    
+    # Restore original profile
+    GPBC_TOKEN="$saved_token"
+    GPBC_TOKEN_NAME="$saved_token_name"
+    
+    # --- Update State ---
+    _verbose "Updating state file with site data..."
+    _state_write ".data.source_site_id" "$source_site_id"
+    _state_write ".data.source_site_url" "$source_site_url"
+    _state_write ".data.source_server_id" "$source_server_id"
+    _state_write ".data.source_server_label" "$source_server_label"
+    _state_write ".data.source_server_ip" "$source_server_ip"
+    _state_write ".data.source_system_user_id" "$source_system_user_id"
+    _state_write ".data.dest_site_id" "$dest_site_id"
+    _state_write ".data.dest_site_url" "$dest_site_url"
+    _state_write ".data.dest_server_id" "$dest_server_id"
+    _state_write ".data.dest_server_label" "$dest_server_label"
+    _state_write ".data.dest_server_ip" "$dest_server_ip"
+    _state_write ".data.dest_system_user_id" "$dest_system_user_id"
+    
+    # Mark step complete
+    _state_add_completed_step "1"
+    
+    _success "Step 1 complete: Input validation passed"
+    _log "STEP 1 COMPLETE: Input validation passed"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Run a specific step or check if it should be skipped
+# Usage: _run_step "1" _step_1
+# -----------------------------------------------------------------------------
+function _run_step() {
+    local step_num="$1"
+    local step_func="$2"
+    
+    # If running a specific step, only run if it matches
+    if [[ -n "$RUN_STEP" ]]; then
+        if [[ "$RUN_STEP" == "$step_num" ]]; then
+            _debug "Running requested step: $step_num"
+            $step_func
+            return $?
+        else
+            _debug "Skipping step $step_num (running step $RUN_STEP only)"
+            return 0
+        fi
+    fi
+    
+    # Check if step already completed (for resume)
+    if _state_is_step_completed "$step_num"; then
+        _loading3 "Step $step_num already completed, skipping..."
+        _log "Step $step_num skipped (already completed)"
+        return 0
+    fi
+    
+    # Run the step
+    $step_func
+    return $?
+}
+
 # -----------------------------------------------------------------------------
 # Argument Parsing
 # -----------------------------------------------------------------------------
@@ -312,6 +574,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -v|--verbose)
             VERBOSE="1"
+            shift
+            ;;
+        -d|--debug)
+            DEBUG="1"
             shift
             ;;
         --step)
@@ -405,3 +671,38 @@ echo
 _success "Phase 2 complete - logging and state management ready"
 _verbose "Log file: $LOG_FILE"
 _verbose "State file: $STATE_FILE"
+
+_debug "DEBUG: DRY_RUN=$DRY_RUN"
+_debug "DEBUG: VERBOSE=$VERBOSE"
+_debug "DEBUG: DEBUG=$DEBUG"
+_debug "DEBUG: RUN_STEP=$RUN_STEP"
+_debug "DEBUG: SITE=$SITE"
+_debug "DEBUG: SOURCE_PROFILE=$SOURCE_PROFILE"
+_debug "DEBUG: DEST_PROFILE=$DEST_PROFILE"
+_debug "DEBUG: STATE_FILE=$STATE_FILE"
+_debug "DEBUG: LOG_FILE=$LOG_FILE"
+
+# =============================================================================
+# Execute Migration Steps
+# =============================================================================
+
+# Step 1: Validate Input
+if ! _run_step "1" _step_1; then
+    _error "Migration failed at Step 1"
+    _log "Migration FAILED at Step 1"
+    exit 1
+fi
+
+# TODO: Implement remaining migration steps
+# Step 2-7 functions should be added and called here
+echo
+_warning "Steps 2-7 not yet implemented."
+_loading3 "The following steps need to be added:"
+echo "  Step 2: Server discovery and SSH validation"
+echo "  Step 3: Test rsync and migrate files"
+echo "  Step 4: Migrate database"
+echo "  Step 5: Migrate nginx config"
+echo "  Step 6: Copy user-config.php (if exists)"
+echo "  Step 7: Final steps (clear cache, print summary)"
+echo
+_log "Migration paused - Steps 2-7 not yet implemented"

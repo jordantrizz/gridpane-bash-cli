@@ -98,39 +98,41 @@
 
 ### Implementation Phases
 
-#### Phase 1 - Script Skeleton and CLI Parsing
+#### Phase 1 - Script Skeleton and CLI Parsing ✅
 **Goal:** Create basic script structure with argument parsing and help text
-* [ ] Create `gp-site-mig.sh` with shebang and source includes
-* [ ] Implement argument parsing: `-s`, `-sp`, `-dp`, `-n`, `-v`, `--step`, `-h`
-* [ ] Implement `_usage()` function with help text
-* [ ] Implement `_pre_flight()` to check dependencies (jq, curl, ssh, rsync)
-* [ ] Add global variables: `DRY_RUN`, `VERBOSE`, `SITE`, `SOURCE_PROFILE`, `DEST_PROFILE`, `RUN_STEP`
+* [x] Create `gp-site-mig.sh` with shebang and source includes
+* [x] Implement argument parsing: `-s`, `-sp`, `-dp`, `-n`, `-v`, `-d`, `--step`, `-h`
+* [x] Implement `_usage()` function with help text
+* [x] Implement `_pre_flight_mig()` to check dependencies (jq, curl, ssh, rsync)
+* [x] Add global variables: `DRY_RUN`, `VERBOSE`, `DEBUG`, `SITE`, `SOURCE_PROFILE`, `DEST_PROFILE`, `RUN_STEP`
 
 **Test:** Run `./gp-site-mig.sh -h` and verify help output; test invalid args
 
-#### Phase 2 - Logging and State Management
+#### Phase 2 - Logging and State Management ✅
 **Goal:** Implement logging system and state file read/write
-* [ ] Implement `_log()` function - writes timestamped entries to log file
-* [ ] Implement `_verbose()` function - prints only when VERBOSE=1
-* [ ] Implement `_dry_run()` function - prints "[DRY-RUN]" prefix when DRY_RUN=1
-* [ ] Implement `_state_init()` - create new state file with initial data
-* [ ] Implement `_state_read()` - read state file into variables
-* [ ] Implement `_state_write()` - update state file (preserving existing data)
-* [ ] Implement `_state_add_completed_step()` - append step to completed_steps array
-* [ ] Implement `_state_is_step_completed()` - check if step already done
-* [ ] Implement resume/restart prompt logic
+* [x] Implement `_log()` function - writes timestamped entries to log file
+* [x] Implement `_verbose()` function - prints only when VERBOSE=1
+* [x] Implement `_dry_run_msg()` function - prints "[DRY-RUN]" prefix when DRY_RUN=1
+* [x] Implement `_debug()` function - prints "[DEBUG]" prefix when DEBUG=1
+* [x] Implement `_state_init()` - create new state file with initial data
+* [x] Implement `_state_read()` - read state file into variables
+* [x] Implement `_state_write()` - update state file (preserving existing data)
+* [x] Implement `_state_add_completed_step()` - append step to completed_steps array
+* [x] Implement `_state_is_step_completed()` - check if step already done
+* [x] Implement resume/restart prompt logic (`_check_resume()`)
 
 **Test:** Create/read/update state file; verify log file creation; test resume prompt
 
-#### Phase 3 - Step 1 Implementation (Validate Input)
+#### Phase 3 - Step 1 Implementation (Validate Input) ✅
 **Goal:** Validate site exists on both profiles via API
-* [ ] Implement `_step_1()` function
-* [ ] Switch to source profile, query API for site by domain
-* [ ] Extract and store: source_site_id, source_server_id, source_system_user
-* [ ] Switch to destination profile, query API for site by domain
-* [ ] Extract and store: dest_site_id, dest_server_id, dest_system_user
-* [ ] Update state file with extracted data
-* [ ] Mark step 1 complete in state
+* [x] Implement `_step_1()` function
+* [x] Switch to source profile, query API for site by domain (uses cache)
+* [x] Extract and store: source_site_id, source_server_id, source_system_user_id
+* [x] Switch to destination profile, query API for site by domain (uses cache)
+* [x] Extract and store: dest_site_id, dest_server_id, dest_system_user_id
+* [x] Update state file with extracted data
+* [x] Mark step 1 complete in state
+* [x] Implement `_run_step()` helper to handle step execution and resume logic
 
 **Test:** Run with valid site on both profiles; run with missing site (expect error)
 
