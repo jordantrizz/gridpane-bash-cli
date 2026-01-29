@@ -66,6 +66,12 @@ function _usage() {
     echo "      get-system-user <id/user>   - Get specific system user by ID or username (formatted)"
     echo "      get-system-user-json <id/user> - Get specific system user by ID or username (JSON)"
     echo
+    echo "  Domains:"
+    echo "      list-domains                - List all domain URLs"
+    echo "      get-domains-json            - Get all domains (JSON)"
+    echo "      get-domain <domain>         - Get domain details (formatted)"
+    echo "      get-domain-json <domain>    - Get domain details (JSON)"
+    echo
     echo "  Cache"
     echo "      cache-stats                 - Display cache statistics (count, size, location)"
     echo "      cache-status-compare        - Compare cache stats with live API stats"
@@ -73,6 +79,7 @@ function _usage() {
     echo "      cache-sites                 - Cache sites from the API"
     echo "      cache-servers               - Cache servers from the API"
     echo "      cache-users                 - Cache system users from the API"
+    echo "      cache-domains               - Cache domains from the API"
     echo "      clear-cache                 - Clear the cache"
     echo
     echo "Options:"
@@ -332,6 +339,26 @@ elif [[ $CMD == "cache-servers" ]]; then
     _gp_api_cache_servers
 elif [[ $CMD == "cache-users" ]]; then
     _gp_api_cache_users
+elif [[ $CMD == "cache-domains" ]]; then
+    _gp_api_cache_domains
+elif [[ $CMD == "list-domains" ]]; then
+    _gp_api_list_domains
+elif [[ $CMD == "get-domains-json" ]]; then
+    _gp_api_get_domains
+elif [[ $CMD == "get-domain" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "Domain URL is required for get-domain command"
+        exit 1
+    fi
+    _gp_api_get_domain_formatted "$CMD_ACTION"
+elif [[ $CMD == "get-domain-json" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _usage
+        _error "Domain URL is required for get-domain-json command"
+        exit 1
+    fi
+    _gp_api_get_domain "$CMD_ACTION"
 elif [[ $CMD == "get-system-users" ]]; then
     _gp_api_list_system_users_formatted
 elif [[ $CMD == "get-system-users-json" ]]; then
