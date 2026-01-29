@@ -131,6 +131,148 @@ function _dry_run_msg() {
 }
 
 # -----------------------------------------------------------------------------
+# Logging function - writes timestamped entries to log file
+# -----------------------------------------------------------------------------
+function _log() {
+    # Ensure log directory exists
+    mkdir -p "$LOG_DIR"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+# -----------------------------------------------------------------------------
+# State Management Functions
+# -----------------------------------------------------------------------------
+
+# Check if state file exists for current site
+function _state_exists() {
+    [[ -f "$STATE_FILE" ]]
+}
+
+# Create new state file with initial data
+function _state_init() {
+    mkdir -p "$STATE_DIR"
+    
+    jq -n \
+        --arg site "$SITE" \
+        --arg source_profile "$SOURCE_PROFILE" \
+        --arg dest_profile "$DEST_PROFILE" \
+        --arg started "$(date -Iseconds)" \
+        '{
+            site: $site,
+            source_profile: $source_profile,
+            dest_profile: $dest_profile,
+            started: $started,
+            last_updated: $started,
+            completed_steps: [],
+            data: {}
+        }' > "$STATE_FILE"
+    
+    _log "STATE: Initialized state file: $STATE_FILE"
+    _verbose "State file created: $STATE_FILE"
+}
+
+# Read a value from state file by jq path
+# Usage: _state_read ".data.source_site_id"
+function _state_read() {
+    local jq_path="$1"
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo ""
+        return 1
+    fi
+    jq -r "$jq_path // empty" "$STATE_FILE"
+}
+
+# Update state file value by jq path (preserves existing data)
+# Usage: _state_write ".data.source_site_id" "12345"
+function _state_write() {
+    local jq_path="$1"
+    local value="$2"
+    
+    if [[ ! -f "$STATE_FILE" ]]; then
+        _error "State file does not exist: $STATE_FILE"
+        return 1
+    fi
+    
+    local tmp_file="${STATE_FILE}.tmp"
+    local timestamp
+    timestamp=$(date -Iseconds)
+    
+    jq --arg val "$value" --arg ts "$timestamp" \
+        "$jq_path = \$val | .last_updated = \$ts" "$STATE_FILE" > "$tmp_file" \
+        && mv "$tmp_file" "$STATE_FILE"
+    
+    _log "STATE: Updated $jq_path = $value"
+    _verbose "State updated: $jq_path = $value"
+}
+
+# Append step to completed_steps array
+# Usage: _state_add_completed_step "1" or _state_add_completed_step "2.1"
+function _state_add_completed_step() {
+    local step="$1"
+    
+    if [[ ! -f "$STATE_FILE" ]]; then
+        _error "State file does not exist: $STATE_FILE"
+        return 1
+    fi
+    
+    local tmp_file="${STATE_FILE}.tmp"
+    local timestamp
+    timestamp=$(date -Iseconds)
+    
+    jq --arg step "$step" --arg ts "$timestamp" \
+        '.completed_steps += [$step] | .last_updated = $ts' "$STATE_FILE" > "$tmp_file" \
+        && mv "$tmp_file" "$STATE_FILE"
+    
+    _log "STATE: Marked step $step as complete"
+    _verbose "Step $step marked complete"
+}
+
+# Check if step already completed
+# Usage: if _state_is_step_completed "2.1"; then echo "Skip"; fi
+function _state_is_step_completed() {
+    local step="$1"
+    
+    if [[ ! -f "$STATE_FILE" ]]; then
+        return 1  # No state file = not completed
+    fi
+    
+    jq -e --arg step "$step" '.completed_steps | index($step) != null' "$STATE_FILE" >/dev/null 2>&1
+}
+
+# Check for existing state and prompt for resume/restart
+function _check_resume() {
+    if _state_exists && [[ -z "$RUN_STEP" ]]; then
+        local completed_count
+        completed_count=$(jq '.completed_steps | length' "$STATE_FILE" 2>/dev/null || echo "0")
+        local last_updated
+        last_updated=$(_state_read ".last_updated")
+        local completed_list
+        completed_list=$(jq -r '.completed_steps | join(", ")' "$STATE_FILE" 2>/dev/null || echo "none")
+        
+        echo
+        _warning "Found existing migration state for '$SITE'"
+        _loading3 "  Completed steps: $completed_list"
+        _loading3 "  Last updated: $last_updated"
+        echo
+        read -p "Resume previous migration? (Y/n): " -n 1 -r
+        echo
+        
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            _loading3 "Starting fresh migration..."
+            rm -f "$STATE_FILE"
+            _state_init
+            _log "Migration restarted (user chose not to resume)"
+        else
+            _success "Resuming migration..."
+            _log "Resuming migration from state file"
+        fi
+    elif [[ ! -f "$STATE_FILE" ]]; then
+        _state_init
+    fi
+    # If --step is specified with existing state, just continue (state already exists)
+}
+
+# -----------------------------------------------------------------------------
 # Argument Parsing
 # -----------------------------------------------------------------------------
 POSITIONAL=()
@@ -209,11 +351,25 @@ fi
 # Sanitize site domain
 SITE=$(_sanitize_domain "$SITE")
 
+# Define state and log file paths (must be after SITE is set)
+STATE_FILE="${STATE_DIR}/gp-site-mig-${SITE}.json"
+LOG_FILE="${LOG_DIR}/gp-site-mig-${SITE}-$(date +%Y%m%d_%H%M%S).log"
+
 # -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
 _loading "GridPane Site Migration - $VERSION"
 _pre_flight_mig
+
+# Initialize logging
+mkdir -p "$LOG_DIR"
+_log "=========================================="
+_log "Migration started for site: $SITE"
+_log "Source profile: $SOURCE_PROFILE"
+_log "Destination profile: $DEST_PROFILE"
+_log "Dry run: $DRY_RUN"
+_log "Run step: ${RUN_STEP:-all}"
+_log "=========================================="
 
 # Display parsed arguments in verbose mode
 _verbose "Site: $SITE"
@@ -222,18 +378,30 @@ _verbose "Destination Profile: $DEST_PROFILE"
 _verbose "Dry Run: $DRY_RUN"
 _verbose "Verbose: $VERBOSE"
 _verbose "Run Step: ${RUN_STEP:-all}"
-_verbose "State Dir: $STATE_DIR"
-_verbose "Log Dir: $LOG_DIR"
+_verbose "State File: $STATE_FILE"
+_verbose "Log File: $LOG_FILE"
 
 if [[ "$DRY_RUN" == "1" ]]; then
     _dry_run_msg "Dry-run mode enabled - no changes will be made"
+    _log "DRY-RUN MODE ENABLED"
 fi
 
+# Handle --step flag: require existing state file
 if [[ -n "$RUN_STEP" ]]; then
+    if [[ ! -f "$STATE_FILE" ]]; then
+        _error "Cannot run step $RUN_STEP: No state file found for '$SITE'"
+        _error "Run a full migration first to create the state file."
+        exit 1
+    fi
     _loading2 "Running step $RUN_STEP only"
+    _log "Running specific step: $RUN_STEP"
 else
+    # Check for resume or initialize state (only for full migrations)
+    _check_resume
     _loading2 "Running all migration steps"
 fi
 
 echo
-_success "Phase 1 complete - ready for Phase 2 (logging and state management)"
+_success "Phase 2 complete - logging and state management ready"
+_verbose "Log file: $LOG_FILE"
+_verbose "State file: $STATE_FILE"
