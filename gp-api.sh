@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/gp-inc.sh"
 source "$SCRIPT_DIR/gp-inc-api.sh"
 source "$SCRIPT_DIR/gp-inc-reports.sh"
 source "$SCRIPT_DIR/gp-inc-compare.sh"
+source "$SCRIPT_DIR/gp-inc-doc.sh"
 [[ -z $DATA_DIR ]] && { DATA_DIR="$SCRIPT_DIR/data"; }
 
 # =======================================
@@ -83,6 +84,11 @@ function _usage() {
     echo "      cache-users                 - Cache system users from the API"
     echo "      cache-domains               - Cache domains from the API"
     echo "      clear-cache                 - Clear the cache"
+    echo
+    echo "  Documentation:"
+    echo "      doc-api                     - List all API endpoint categories"
+    echo "      doc <category>              - List endpoints in a category (e.g., doc server)"
+    echo "      doc <category> <endpoint>   - Show full endpoint details (e.g., doc server get-servers)"
     echo
     echo "Options:"
     echo "  -h, --help                      - Show this help message"
@@ -382,6 +388,19 @@ elif [[ $CMD == "get-system-user-json" ]]; then
     _gp_api_get_user "$CMD_ACTION"
 elif [[ $CMD == "clear-cache" ]]; then
     _gp_api_clear_cache
+# ============================================
+# -- Documentation Commands
+# ============================================
+elif [[ $CMD == "doc-api" ]]; then
+    _gp_doc_list_categories
+elif [[ $CMD == "doc" ]]; then
+    if [[ -z "$CMD_ACTION" ]]; then
+        _gp_doc_list_categories
+    elif [[ -z "$CMD_ACTION2" ]]; then
+        _gp_doc_list_endpoints "$CMD_ACTION"
+    else
+        _gp_doc_show_endpoint "$CMD_ACTION" "$CMD_ACTION2"
+    fi
 elif [[ $CMD == "" ]]; then
     _usage
     _error "No command provided"

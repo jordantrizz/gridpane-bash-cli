@@ -27,6 +27,20 @@ _cache () { echo -e "\e[38;5;208mCACHE: $1\e[0m"; }
 # -- Dark red text for live API operations
 _live () { echo -e "\e[38;5;160mLIVE: $1\e[0m"; }
 
+# -- Pause for rate limiting with standardized message
+_pause_for_rate_limit() {
+    local seconds="$1"
+    local context="${2:-}"
+    local msg="Pausing for ${seconds} seconds to avoid hitting API rate limits..."
+    [[ -n "$context" ]] && msg="$msg ($context)"
+    _loading3 "  $msg"
+    # Log if _log function exists (may be called before log file is set up)
+    if declare -f _log >/dev/null 2>&1; then
+        _log "$msg"
+    fi
+    sleep "$seconds"
+}
+
 # -- Mask sensitive tokens in debug output (show first 15 chars + '... (truncated)')
 _mask_token() {
     local token="$1"

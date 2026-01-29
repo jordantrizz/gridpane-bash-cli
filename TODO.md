@@ -1,72 +1,193 @@
 # TODO.md
 
-## doc commands
-* Create a doc section.
-* Create a command called doc-api that will list all of the available endpoints categories, such as sites, servers, system users, etc.
-* Typing -c doc sites will list all endpoints available for sites with a short description of each endpoint.
-* Typing -c doc sites get-sites will show the full documentation for that endpoint including parameters
-* Create a gp-inc-doc.sh file.
-
 ## gp-site-mig.sh
-* Create a new command called gp-site-mig.sh that operates similar to gp-api.sh the goal of it is to migrate a site from one gridpane server on one account to another gridpane server on another account.
-* The command will ask for the the following
-  * -s <site>
-  * -sp <source-site-profile>
-  * -ss <source-server-id>
-  * -dp <destination-site-profile>
-  * -ds <destination-server-id>
-* The command will allow you to run in a dry-run mode to see what will be done without actually doing it.
-  * -n (dry-run)
-* The command will allow you to run in verbose mode to see more details of what is happening
-    * -v (verbose)
-* The command will automatically log all actions into the logs folder each log item will be time stamped.
-* The log file will be named gp-site-mig-<site>-<timestamp>.log
-* The command will be broken into the following parts
-* Part 1 - Validate Input
-  * Confirm that the site exists on the source server
-  * Confirm that the site eixts on the destination server
-  * Store the following data
-    * Source site ID
-    * Source server IP
-    * Source site system user
-    * Destination site ID
-    * Destination server IP
-    * Destination site system user
-    *  If anything fails here, exit the script with an error.
-* Part 2 - Get Server IP's and confirm SSH and get Database Info
-  * Confirm SSH connectivity to source and destination server
-  * Get database name and store to use later, look in $HOME/sites/<site>/wp-config.php for DB_NAME
-  * Confirm database exists on both source and destination servers
-  * Confirm site directory, check under the two locations and make sure a htdocs is present
-    * $HOME/sites/<site>
-    * $HOME/home/<system-user>/sites/<site>
-  * Store the site directory path to use later, don't include htdocs in the path
-  *  If anything fails here, exit the script with an error.
-* Part 3 - Test Rsync and Migrate Files
-  * Source and destination test.
-    * Confirm rsync is installed on server
-    * Confirm access to the htdocs directory on the each server, it will be under the site directory
-    * If anything fails here, exit the script with an error.
-  * Rsync the htdocs folder from the source server to the destination server and log the rsync output.
-* Part 4 - Migrate Database
-  * Export the database from the source server using mysqldump and pipe it to mysql on the destination server.
-  * Log the output of the database migration.
-  * If anything fails here, exit the script with an error.
-* Part 5 - Migrate Nginx Config
-  * Check if there are files other than the following.
-    * gspotofmobile.com-headers-csp.conf
-    * gspotofmobile.com-sockfile.conf
-  * If there are print them out.
-  * If you find the following run the following command via the gp command
-    * disable-xmlrpc-main-context.conf = gp site {site.url} -disable-xmlrpc
-    * disable-wp-trackbacks-main-context.conf = gp site {site.url} -block-wp-trackbacks.php
-    * disable-wp-links-opml-main-context.conf = gp site {site.url} -block-wp-links-opml.php
-    * disable-wp-comments-post-main-context.conf = gp site {site.url} -block-wp-comments-post.php
-  * copy and tar up the nginx files and place them in the site directory on the destination server as nginx-{site}-backup-{timestamp}.tar.gz
-* Part 6 - Copy user-config.php if it exists
-  * Check if user-config.php exists in the site directory on the source server
-  * If it does, copy it to the destination server site directory
-  * Backup the same user-config.php on the destination server by copying and naming it user-config-{timestamp}.php
-* Part 7 - Final Steps
-  * Clear cache on destination server via gp command
-  * Print out a summary of the migration including any errors that may have occurred.
+* Create a new command called gp-site-mig.sh that operates similar to gp-api.sh
+* Goal: Migrate a site from one GridPane server/account to another GridPane server/account
+
+### CLI Arguments
+* `-s <site>` - Site domain to migrate
+* `-sp <source-profile>` - Source account profile name (from ~/.gridpane)
+* `-dp <destination-profile>` - Destination account profile name (from ~/.gridpane)
+* `-n` - Dry-run mode (show what would be done without executing)
+* `-v` - Verbose mode (show detailed output)
+* `--step <step>` - Run a specific step only (e.g., `--step 3` or `--step 2.1`)
+
+### Infrastructure
+* **Logs folder**: `logs/` - Contains timestamped log files `gp-site-mig-<site>-<timestamp>.log`
+* **State folder**: `state/` - Contains JSON state files `gp-site-mig-<site>.json`
+
+### State File Format (JSON)
+```json
+{
+  "site": "example.com",
+  "source_profile": "account1",
+  "dest_profile": "account2",
+  "source_site_id": "12345",
+  "dest_site_id": "67890",
+  "source_server_ip": "1.2.3.4",
+  "dest_server_ip": "5.6.7.8",
+  "source_system_user": "user1",
+  "dest_system_user": "user2",
+  "source_site_path": "/home/user1/sites/example.com",
+  "dest_site_path": "/home/user2/sites/example.com",
+  "db_name": "example_db",
+  "completed_steps": ["1", "2.1", "2.2"],
+  "last_updated": "2026-01-29T12:00:00Z"
+}
+```
+
+### Resume/Restart Logic
+* No state file + no `--step`: Run all steps from beginning
+* State file exists + no `--step`: Prompt "Resume previous migration? (y/n)"
+  * If "y": Skip completed steps, continue from where left off
+  * If "n": Delete state file, start fresh
+* `--step N`: Run only that step (requires state file with prerequisite data, will error if missing)
+
+### Migration Steps
+
+#### Step 1 - Validate Input
+* Confirm site exists on source profile (via API)
+* Confirm site exists on destination profile (via API)
+* Store to state: source_site_id, dest_site_id, source_system_user, dest_system_user
+* If anything fails, exit with error
+
+#### Step 2 - Server Discovery and SSH Validation
+* **2.1** - Get server IPs from API and store to state
+* **2.2** - Test SSH connectivity to source and destination servers
+* **2.3** - Get database name from wp-config.php via SSH, store to state
+* **2.4** - Confirm database exists on both servers via SSH
+* **2.5** - Confirm site directory exists (check both paths), store site_path to state:
+  * `$HOME/sites/<site>`
+  * `$HOME/home/<system-user>/sites/<site>`
+* If anything fails, exit with error
+
+#### Step 3 - Test Rsync and Migrate Files
+* **3.1** - Confirm rsync installed on source server
+* **3.2** - Confirm rsync installed on destination server, confirm htdocs access
+* **3.3** - Rsync htdocs from source to destination, log output
+* If anything fails, exit with error
+
+#### Step 4 - Migrate Database
+* Export database from source using mysqldump, pipe to mysql on destination via SSH
+* Log the database migration output
+* If anything fails, exit with error
+
+#### Step 5 - Migrate Nginx Config
+* **5.1** - Check for nginx config files beyond standard ones:
+  * `<site>-headers-csp.conf`
+  * `<site>-sockfile.conf`
+  * Print any additional files found
+* **5.2** - If special configs found, run corresponding gp commands on destination:
+  * `disable-xmlrpc-main-context.conf` → `gp site {site} -disable-xmlrpc`
+  * `disable-wp-trackbacks-main-context.conf` → `gp site {site} -block-wp-trackbacks.php`
+  * `disable-wp-links-opml-main-context.conf` → `gp site {site} -block-wp-links-opml.php`
+  * `disable-wp-comments-post-main-context.conf` → `gp site {site} -block-wp-comments-post.php`
+* **5.3** - Tar and copy nginx files to destination: `nginx-{site}-backup-{timestamp}.tar.gz`
+
+#### Step 6 - Copy user-config.php
+* Check if user-config.php exists on source
+* If exists:
+  * Backup existing on destination as `user-config-{timestamp}.php`
+  * Copy from source to destination
+
+#### Step 7 - Final Steps
+* Clear cache on destination server via gp command
+* Print summary of migration including any errors that occurred
+
+---
+
+### Implementation Phases
+
+#### Phase 1 - Script Skeleton and CLI Parsing
+**Goal:** Create basic script structure with argument parsing and help text
+* [ ] Create `gp-site-mig.sh` with shebang and source includes
+* [ ] Implement argument parsing: `-s`, `-sp`, `-dp`, `-n`, `-v`, `--step`, `-h`
+* [ ] Implement `_usage()` function with help text
+* [ ] Implement `_pre_flight()` to check dependencies (jq, curl, ssh, rsync)
+* [ ] Add global variables: `DRY_RUN`, `VERBOSE`, `SITE`, `SOURCE_PROFILE`, `DEST_PROFILE`, `RUN_STEP`
+
+**Test:** Run `./gp-site-mig.sh -h` and verify help output; test invalid args
+
+#### Phase 2 - Logging and State Management
+**Goal:** Implement logging system and state file read/write
+* [ ] Implement `_log()` function - writes timestamped entries to log file
+* [ ] Implement `_verbose()` function - prints only when VERBOSE=1
+* [ ] Implement `_dry_run()` function - prints "[DRY-RUN]" prefix when DRY_RUN=1
+* [ ] Implement `_state_init()` - create new state file with initial data
+* [ ] Implement `_state_read()` - read state file into variables
+* [ ] Implement `_state_write()` - update state file (preserving existing data)
+* [ ] Implement `_state_add_completed_step()` - append step to completed_steps array
+* [ ] Implement `_state_is_step_completed()` - check if step already done
+* [ ] Implement resume/restart prompt logic
+
+**Test:** Create/read/update state file; verify log file creation; test resume prompt
+
+#### Phase 3 - Step 1 Implementation (Validate Input)
+**Goal:** Validate site exists on both profiles via API
+* [ ] Implement `_step_1()` function
+* [ ] Switch to source profile, query API for site by domain
+* [ ] Extract and store: source_site_id, source_server_id, source_system_user
+* [ ] Switch to destination profile, query API for site by domain
+* [ ] Extract and store: dest_site_id, dest_server_id, dest_system_user
+* [ ] Update state file with extracted data
+* [ ] Mark step 1 complete in state
+
+**Test:** Run with valid site on both profiles; run with missing site (expect error)
+
+#### Phase 4 - Step 2 Implementation (Server Discovery & SSH)
+**Goal:** Get server IPs and validate SSH connectivity
+* [ ] Implement `_step_2_1()` - Get server IPs from API, store to state
+* [ ] Implement `_step_2_2()` - Test SSH to both servers (`ssh -o ConnectTimeout=5 -o BatchMode=yes`)
+* [ ] Implement `_step_2_3()` - SSH to source, grep DB_NAME from wp-config.php
+* [ ] Implement `_step_2_4()` - SSH to both servers, verify database exists (`mysql -e "SHOW DATABASES LIKE 'dbname'"`)
+* [ ] Implement `_step_2_5()` - SSH to both servers, find site directory path, store to state
+* [ ] Implement wrapper `_step_2()` that calls all sub-steps
+
+**Test:** Run each sub-step individually with `--step 2.1`, etc.; verify state updates
+
+#### Phase 5 - Step 3 Implementation (Rsync)
+**Goal:** Validate rsync and migrate files
+* [ ] Implement `_step_3_1()` - SSH to source, verify `which rsync`
+* [ ] Implement `_step_3_2()` - SSH to destination, verify rsync and htdocs writable
+* [ ] Implement `_step_3_3()` - Execute rsync with progress, log output
+  * Use: `rsync -avz --progress -e ssh source:path/ dest:path/`
+  * Respect DRY_RUN flag (add `--dry-run` to rsync)
+* [ ] Implement wrapper `_step_3()` that calls all sub-steps
+
+**Test:** Run rsync in dry-run mode first; verify file transfer on test site
+
+#### Phase 6 - Step 4 Implementation (Database Migration)
+**Goal:** Export and import database
+* [ ] Implement `_step_4()` function
+* [ ] Build mysqldump command with proper credentials
+* [ ] Pipe over SSH: `ssh source "mysqldump db" | ssh dest "mysql db"`
+* [ ] Log output and any errors
+* [ ] Respect DRY_RUN flag (print command without executing)
+
+**Test:** Run in dry-run mode; test on non-production site first
+
+#### Phase 7 - Step 5 Implementation (Nginx Config)
+**Goal:** Check and migrate nginx configurations
+* [ ] Implement `_step_5_1()` - SSH to source, list nginx configs, filter standard ones
+* [ ] Implement `_step_5_2()` - For each special config, run corresponding gp command on dest
+* [ ] Implement `_step_5_3()` - Tar nginx configs, scp to destination
+* [ ] Implement wrapper `_step_5()` that calls all sub-steps
+
+**Test:** Run on site with custom nginx configs; verify gp commands execute
+
+#### Phase 8 - Steps 6 & 7 Implementation (Final Steps)
+**Goal:** Copy user-config.php and finalize
+* [ ] Implement `_step_6()` - Check for user-config.php, backup and copy if exists
+* [ ] Implement `_step_7()` - Clear cache, print summary
+* [ ] Implement `_print_summary()` - Show all completed steps, any errors, timing
+
+**Test:** Full end-to-end migration on test site
+
+#### Phase 9 - Polish and Error Handling
+**Goal:** Improve robustness and user experience
+* [ ] Add color output for success/error/warning messages
+* [ ] Add timing information (how long each step took)
+* [ ] Improve error messages with actionable suggestions
+* [ ] Add `--force` flag to skip confirmations
+* [ ] Add `--clean` flag to remove state file for a site
+* [ ] Test edge cases: interrupted migration, network failures, permission issues

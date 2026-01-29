@@ -2,3 +2,7 @@
 debug.log
 data
 *.txt
+logs/*.log
+state/*
+!logs/.placeholder
+!state/.placeholder

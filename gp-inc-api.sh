@@ -13,6 +13,9 @@ function gp_api () {
     local EXTRA=$3
     local CURL_HEADERS=()
     local CACHE_FILE
+    local RETRY_COUNT=0
+    local MAX_RETRIES=1
+    local RATE_LIMIT_DELAY=15
 
     # -- Check if the GPBC_TOKEN is set
     if [[ -z $GPBC_TOKEN ]]; then
@@ -21,30 +24,48 @@ function gp_api () {
 
     _debugf "gp_api called with METHOD: $METHOD, ENDPOINT: $ENDPOINT, EXTRA: $EXTRA"
 
-    [[ $DEBUGF == "1" ]] && set -x
-    CURL_HEADERS+=(-H "Authorization: Bearer $GPBC_TOKEN")
-    CURL_OUTPUT=$(mktemp)
-    CURL_HTTP_CODE="$(curl -s \
-    --output "$CURL_OUTPUT" \
-    -w "%{http_code}\n" \
-    --request "$METHOD" \
-    --url "${GP_API_URL}${ENDPOINT}" \
-    "${CURL_HEADERS[@]}" \
-    "${EXTRA[@]}")"
-    CURL_EXIT_CODE="$?"
-    [[ $DEBUGF == "1" ]] && set +x
-    API_OUTPUT=$(<"$CURL_OUTPUT")
-    
-    # Debug API response
-    _debugf "API Request: $METHOD ${GP_API_URL}${ENDPOINT}"
-    _debugf "API HTTP Code: $CURL_HTTP_CODE"
-    _debugf "API Curl Exit Code: $CURL_EXIT_CODE"
-    _debugf "API Response: $API_OUTPUT"
+    while true; do
+        [[ $DEBUGF == "1" ]] && set -x
+        CURL_HEADERS=(-H "Authorization: Bearer $GPBC_TOKEN")
+        CURL_OUTPUT=$(mktemp)
+        CURL_HTTP_CODE="$(curl -s \
+        --output "$CURL_OUTPUT" \
+        -w "%{http_code}\n" \
+        --request "$METHOD" \
+        --url "${GP_API_URL}${ENDPOINT}" \
+        "${CURL_HEADERS[@]}" \
+        "${EXTRA[@]}")"
+        CURL_EXIT_CODE="$?"
+        [[ $DEBUGF == "1" ]] && set +x
+        API_OUTPUT=$(<"$CURL_OUTPUT")
+        
+        # Debug API response
+        _debugf "API Request: $METHOD ${GP_API_URL}${ENDPOINT}"
+        _debugf "API HTTP Code: $CURL_HTTP_CODE"
+        _debugf "API Curl Exit Code: $CURL_EXIT_CODE"
+        _debugf "API Response: $API_OUTPUT"
+        
+        # Remove new line and everything after it
+        CURL_HTTP_CODE=${CURL_HTTP_CODE%%$'\n'*}
+        
+        # Handle rate limiting (429)
+        if [[ $CURL_HTTP_CODE -eq 429 ]]; then
+            if [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; then
+                ((RETRY_COUNT++))
+                _warning "Rate limited (429). Retry ${RETRY_COUNT}/${MAX_RETRIES}..."
+                _pause_for_rate_limit $RATE_LIMIT_DELAY "retry ${RETRY_COUNT}/${MAX_RETRIES}"
+                continue
+            else
+                API_ERROR="Rate limited (429) after ${MAX_RETRIES} retry. Please wait and try again."
+                return 1
+            fi
+        fi
+        
+        # Break out of retry loop on non-429 response
+        break
+    done
     
     [[ -z "$API_OUTPUT" ]] && { API_ERROR="No API output"; return 1; }
-    #[[ $CURL_EXIT_CODE != 0 ]] && { API_ERROR="CURL exit code: $CURL_EXIT_CODE"; return 1; }
-    # Remove new line and everything after it
-    CURL_HTTP_CODE=${CURL_HTTP_CODE%%$'\n'*}
     [[ $CURL_HTTP_CODE -ne 200 ]] && { API_ERROR="CURL HTTP code: $CURL_HTTP_CODE Exit Code: $CURL_EXIT_CODE"; return 1; }
 
     # -- Store in cache
@@ -2264,10 +2285,9 @@ function _gp_csv_add_sites () {
         
         if [[ $SITE_CHECK_RC -eq 0 ]]; then
             # Site exists - skip it
-            _live "Site already exists (confirmed via API), waiting 5 seconds..."
+            _live "Site already exists (confirmed via API)"
             _log "LIVE: Site already exists (confirmed via API) - skipping"
-            _log "Waiting 5s..."
-            sleep 5
+            _pause_for_rate_limit 5 "site exists, skipping"
             continue
         else
             # Site doesn't exist
@@ -2276,10 +2296,8 @@ function _gp_csv_add_sites () {
         fi
         
         # Site doesn't exist - proceed with creation
-        _loading3 "  Site does not exist, waiting 5 seconds before creating..."
         _log "Site does not exist, proceeding with creation..."
-        _log "Waiting 5s before creation..."
-        sleep 5
+        _pause_for_rate_limit 5 "before creating site"
         
         # Show API call details
         _live "Sending API request to GridPane..."
@@ -2307,9 +2325,9 @@ function _gp_csv_add_sites () {
                 local CURRENT_DELAY=$((RETRY_DELAY * RETRY_COUNT))
                 
                 if [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; then
-                    _live "Rate limited! Waiting ${CURRENT_DELAY}s before retry ${RETRY_COUNT}/${MAX_RETRIES}..."
-                    _log "LIVE: Rate limited (429) - Retry ${RETRY_COUNT}/${MAX_RETRIES}, waiting ${CURRENT_DELAY}s..."
-                    sleep "$CURRENT_DELAY"
+                    _live "Rate limited! Retry ${RETRY_COUNT}/${MAX_RETRIES}..."
+                    _log "LIVE: Rate limited (429) - Retry ${RETRY_COUNT}/${MAX_RETRIES}"
+                    _pause_for_rate_limit "$CURRENT_DELAY" "retry ${RETRY_COUNT}/${MAX_RETRIES}"
                 else
                     _error "  Rate limited! Max retries (${MAX_RETRIES}) exceeded."
                     _log "LIVE: Rate limited (429) - Max retries exceeded after ${RETRY_COUNT} attempts"
@@ -2343,8 +2361,7 @@ function _gp_csv_add_sites () {
                 # Save to progress file so we don't check again
                 echo "$DOMAIN" >> "$PROGRESS_FILE"
                 _log "PROGRESS: Saved $DOMAIN to progress file (already exists)"
-                _log "Waiting 5s..."
-                sleep 5
+                _pause_for_rate_limit 5 "site already exists, skipping"
                 continue
             fi
             
@@ -2365,9 +2382,7 @@ function _gp_csv_add_sites () {
         
         # Sleep between additions (except after last row)
         if [[ $ROW_COUNT -lt $(wc -l < "$CSV_FILE") ]]; then
-            _loading3 "  Rate limiting: waiting ${DELAY}s before next site..."
-            _log "Sleeping ${DELAY}s before next addition..."
-            sleep "$DELAY"
+            _pause_for_rate_limit "$DELAY" "before next site"
         fi
         
     done < "$CSV_FILE"
