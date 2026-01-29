@@ -14,6 +14,7 @@ DRY_RUN="0"
 VERBOSE="0"
 DEBUG="0"
 RUN_STEP=""
+RSYNC_LOCAL="0"
 SITE=""
 SOURCE_PROFILE=""
 DEST_PROFILE=""
@@ -37,6 +38,7 @@ function _usage() {
     echo "  -n,  --dry-run                  Show what would be done without executing"
     echo "  -v,  --verbose                  Show detailed output"
     echo "  -d,  --debug                    Enable debug output"
+    echo "  --rsync-local                    If server-to-server rsync fails, relay via local machine"
     echo "  --step <step>                   Run a specific step only (e.g., 3 or 2.1)"
     echo "  -h,  --help                     Show this help message"
     echo
@@ -51,7 +53,8 @@ function _usage() {
     echo "  3     - Test rsync and migrate files"
     echo "          3.1  Confirm rsync on source"
     echo "          3.2  Confirm rsync on destination"
-    echo "          3.3  Rsync htdocs"
+    echo "          3.3  Authorize destination SSH key on source (remote rsync prereq)"
+    echo "          3.4  Rsync htdocs"
     echo "  4     - Migrate database"
     echo "  5     - Migrate nginx config"
     echo "          5.1  Check for custom nginx configs"
@@ -937,18 +940,14 @@ function _step_2_5() {
     fi
 
     local source_htdocs_path source_site_path dest_htdocs_path dest_site_path
-    source_htdocs_path=$(dirname "$source_wp_config")
-    dest_htdocs_path=$(dirname "$dest_wp_config")
-    if [[ "$source_wp_config" == */htdocs/wp-config.php ]]; then
-        source_site_path="${source_htdocs_path%/htdocs}"
-    else
-        source_site_path="$source_htdocs_path"
-    fi
-    if [[ "$dest_wp_config" == */htdocs/wp-config.php ]]; then
-        dest_site_path="${dest_htdocs_path%/htdocs}"
-    else
-        dest_site_path="$dest_htdocs_path"
-    fi
+
+    # GridPane structure: wp-config.php is always in site root, htdocs is site_path/htdocs
+    # e.g., /var/www/site/wp-config.php -> site_path=/var/www/site, htdocs=/var/www/site/htdocs
+    source_site_path=$(dirname "$source_wp_config")
+    source_htdocs_path="${source_site_path}/htdocs"
+
+    dest_site_path=$(dirname "$dest_wp_config")
+    dest_htdocs_path="${dest_site_path}/htdocs"
 
     _success "Source wp-config: $source_wp_config"
     _loading3 "  Source htdocs: $source_htdocs_path"
@@ -1187,6 +1186,499 @@ function _step_2() {
     return 0
 }
 
+function _normalize_htdocs_path() {
+    local host_ip="$1"
+    local current_path="$2"
+    local state_key="$3"
+
+    if [[ -z "$host_ip" || -z "$current_path" ]]; then
+        return 1
+    fi
+
+    # Already looks like an htdocs path.
+    if [[ "$current_path" == */htdocs ]]; then
+        echo "$current_path"
+        return 0
+    fi
+
+    local candidate
+    candidate="${current_path%/}/htdocs"
+
+    # Prefer the common GridPane layout: <site_root>/htdocs
+    local has_candidate
+    has_candidate=$(_ssh_capture "$host_ip" "test -d '$candidate' && echo yes || echo no")
+    if [[ "$has_candidate" == "yes" ]]; then
+        _warning "State htdocs path looks like site root: '$current_path'"
+        _loading3 "Using detected htdocs: '$candidate'"
+        if [[ -n "$state_key" ]]; then
+            _state_write "$state_key" "$candidate"
+        fi
+        echo "$candidate"
+        return 0
+    fi
+
+    # Fallback: if the current path itself appears to be a WordPress docroot, accept it.
+    local looks_like_wp_root
+    looks_like_wp_root=$(_ssh_capture "$host_ip" "test -d '$current_path/wp-admin' -a -d '$current_path/wp-includes' && echo yes || echo no")
+    if [[ "$looks_like_wp_root" == "yes" ]]; then
+        echo "$current_path"
+        return 0
+    fi
+
+    _error "Could not determine htdocs directory from '$current_path' on $host_ip"
+    _log "HTDOCS NORMALIZE FAILED: current_path='$current_path', host='$host_ip'"
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# Step 3.1 - Confirm rsync is installed on source server
+# Requires Step 2.1 (server IPs)
+# -----------------------------------------------------------------------------
+function _step_3_1() {
+    _loading "Step 3.1: Verifying rsync on source server"
+    _log "STEP 3.1: Verifying rsync on source server"
+
+    local source_server_ip
+    source_server_ip=$(_state_read ".data.source_server_ip")
+
+    if [[ -z "$source_server_ip" ]]; then
+        _error "Missing source server IP in state. Run Step 2.1 first."
+        _log "STEP 3.1 FAILED: Missing source server IP"
+        return 1
+    fi
+
+    local rsync_path
+    rsync_path=$(_ssh_capture "$source_server_ip" "which rsync 2>/dev/null || command -v rsync 2>/dev/null")
+
+    if [[ -z "$rsync_path" ]]; then
+        _error "rsync not found on source server ($source_server_ip)"
+        _loading3 "Install rsync: apt-get install rsync"
+        _log "STEP 3.1 FAILED: rsync not found on source"
+        return 1
+    fi
+
+    _success "rsync found on source: $rsync_path"
+    _state_write ".data.source_rsync_path" "$rsync_path"
+    _state_add_completed_step "3.1"
+    _log "STEP 3.1 COMPLETE: rsync verified on source"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 3.2 - Confirm rsync is installed on destination and htdocs is writable
+# Requires Step 2.1, 2.5 (server IPs and htdocs path)
+# -----------------------------------------------------------------------------
+function _step_3_2() {
+    _loading "Step 3.2: Verifying rsync on destination server"
+    _log "STEP 3.2: Verifying rsync on destination server"
+
+    local dest_server_ip dest_htdocs_path
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+    dest_htdocs_path=$(_state_read ".data.dest_htdocs_path")
+
+    if [[ -z "$dest_server_ip" ]]; then
+        _error "Missing destination server IP in state. Run Step 2.1 first."
+        _log "STEP 3.2 FAILED: Missing destination server IP"
+        return 1
+    fi
+
+    if [[ -z "$dest_htdocs_path" ]]; then
+        _error "Missing destination htdocs path in state. Run Step 2.5 first."
+        _log "STEP 3.2 FAILED: Missing destination htdocs path"
+        return 1
+    fi
+
+    dest_htdocs_path=$(_normalize_htdocs_path "$dest_server_ip" "$dest_htdocs_path" ".data.dest_htdocs_path") || return 1
+
+    # Verify rsync is installed
+    local rsync_path
+    rsync_path=$(_ssh_capture "$dest_server_ip" "which rsync 2>/dev/null || command -v rsync 2>/dev/null")
+
+    if [[ -z "$rsync_path" ]]; then
+        _error "rsync not found on destination server ($dest_server_ip)"
+        _loading3 "Install rsync: apt-get install rsync"
+        _log "STEP 3.2 FAILED: rsync not found on destination"
+        return 1
+    fi
+
+    _success "rsync found on destination: $rsync_path"
+
+    # Verify htdocs directory is writable
+    _loading2 "Verifying htdocs is writable on destination..."
+    local write_test
+    write_test=$(_ssh_capture "$dest_server_ip" "test -w '$dest_htdocs_path' && echo 'writable' || echo 'not_writable'")
+
+    if [[ "$write_test" != "writable" ]]; then
+        _error "htdocs not writable on destination: $dest_htdocs_path"
+        _log "STEP 3.2 FAILED: htdocs not writable on destination"
+        return 1
+    fi
+
+    _success "htdocs is writable on destination"
+    _state_write ".data.dest_rsync_path" "$rsync_path"
+    _state_add_completed_step "3.2"
+    _log "STEP 3.2 COMPLETE: rsync verified on destination, htdocs writable"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 3.3 - Ensure destination server SSH key is authorized on source server
+#
+# Remote rsync runs ON the destination server, pulling FROM the source server.
+# That requires destination->source SSH auth (root user only).
+#
+# This step:
+#   3.3.1 - Test if destination can already SSH to source (skip if yes)
+#   3.3.2 - Fetch destination /root/.ssh/id_rsa.pub
+#   3.3.3 - Validate source /root/.ssh/authorized_keys exists
+#   3.3.4 - Append destination pubkey to source authorized_keys (if not present)
+#   3.3.5 - Prime known_hosts on destination for source
+# -----------------------------------------------------------------------------
+function _step_3_3() {
+    _loading "Step 3.3: Authorizing destination SSH key on source"
+    _log "STEP 3.3: Authorizing destination SSH key on source"
+
+    local source_server_ip dest_server_ip
+    source_server_ip=$(_state_read ".data.source_server_ip")
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+
+    if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
+        _error "Missing server IPs in state. Run Step 2.1 first."
+        _log "STEP 3.3 FAILED: Missing server IPs"
+        return 1
+    fi
+
+    # -------------------------------------------------------------------------
+    # 3.3.1 - Test if destination can already SSH to source
+    # -------------------------------------------------------------------------
+    _loading2 "3.3.1: Testing if destination can SSH to source..."
+    local ssh_test_result ssh_test_rc
+    ssh_test_result=$(_ssh_capture "$dest_server_ip" "ssh -o ConnectTimeout=5 -o BatchMode=yes root@$source_server_ip 'echo ok' 2>&1")
+    ssh_test_rc=$?
+
+    if [[ $ssh_test_rc -eq 0 && "$ssh_test_result" == "ok" ]]; then
+        _success "Destination already has SSH access to source, skipping key setup"
+        _log "STEP 3.3.1: Destination already authorized on source"
+        _state_add_completed_step "3.3"
+        _log "STEP 3.3 COMPLETE: Destination already authorized on source"
+        echo
+        return 0
+    fi
+    _debug "3.3.1: SSH test failed (rc=$ssh_test_rc), proceeding with key setup"
+
+    # -------------------------------------------------------------------------
+    # 3.3.2 - Fetch destination public key
+    # -------------------------------------------------------------------------
+    _loading2 "3.3.2: Fetching destination public key (/root/.ssh/id_rsa.pub)..."
+    local dest_pubkey
+    dest_pubkey=$(_ssh_capture "$dest_server_ip" "cat /root/.ssh/id_rsa.pub 2>/dev/null")
+    local fetch_rc=$?
+    dest_pubkey="$(echo "$dest_pubkey" | head -n 1 | tr -d '\r')"
+
+    if [[ $fetch_rc -ne 0 || -z "$dest_pubkey" ]]; then
+        _error "Failed to fetch destination public key: root@$dest_server_ip:/root/.ssh/id_rsa.pub"
+        _loading3 "Fix: generate a key on destination (e.g., ssh-keygen -t rsa -N '' -f /root/.ssh/id_rsa)"
+        _log "STEP 3.3.2 FAILED: Could not fetch destination id_rsa.pub"
+        return 1
+    fi
+
+    _debug "3.3.2: Destination public key: $dest_pubkey"
+    _success "Fetched destination public key"
+
+    # -------------------------------------------------------------------------
+    # 3.3.3 - Validate source authorized_keys exists
+    # -------------------------------------------------------------------------
+    _loading2 "3.3.3: Checking if source /root/.ssh/authorized_keys exists..."
+    _ssh_capture "$source_server_ip" "test -f /root/.ssh/authorized_keys" >/dev/null 2>&1
+    local test_rc=$?
+
+    if [[ $test_rc -ne 0 ]]; then
+        _error "Source /root/.ssh/authorized_keys does not exist"
+        _loading3 "Fix: create the file on source (e.g., touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys)"
+        _log "STEP 3.3.3 FAILED: Source authorized_keys does not exist"
+        return 1
+    fi
+    _success "Source authorized_keys exists"
+
+    # -------------------------------------------------------------------------
+    # 3.3.4 - Append destination pubkey to source authorized_keys
+    # Note: This runs even in dry-run mode (SSH key setup is safe and required)
+    # -------------------------------------------------------------------------
+    _loading2 "3.3.4: Appending destination key to source authorized_keys..."
+
+    # Check if key already present
+    local key_b64
+    key_b64=$(printf "%s" "$dest_pubkey" | base64 -w0 2>/dev/null || printf "%s" "$dest_pubkey" | base64 2>/dev/null | tr -d '\n')
+
+    local check_and_append_cmd
+    check_and_append_cmd="pubkey=\$(echo '$key_b64' | base64 -d 2>/dev/null || echo '$key_b64' | base64 --decode 2>/dev/null); if grep -qxF \"\$pubkey\" /root/.ssh/authorized_keys; then echo ALREADY_PRESENT; else printf '%s\n' \"\$pubkey\" >> /root/.ssh/authorized_keys && echo ADDED; fi"
+
+    local append_result append_rc
+    append_result=$(_ssh_capture "$source_server_ip" "$check_and_append_cmd")
+    append_rc=$?
+
+    if [[ $append_rc -ne 0 ]]; then
+        _error "Failed to append key to source authorized_keys"
+        _log "STEP 3.3.4 FAILED: Could not append key"
+        return 1
+    fi
+
+    if [[ "$append_result" == "ALREADY_PRESENT" ]]; then
+        _success "Destination key already present on source"
+    else
+        _success "Destination key added to source authorized_keys"
+    fi
+
+    # -------------------------------------------------------------------------
+    # 3.3.5 - Prime known_hosts on destination for source
+    # -------------------------------------------------------------------------
+    _loading2 "3.3.5: Priming destination known_hosts for source..."
+    if [[ "$DRY_RUN" == "1" ]]; then
+        _dry_run_msg "Would prime known_hosts on destination for source"
+    else
+        _ssh_capture "$dest_server_ip" "ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@$source_server_ip 'echo ok' >/dev/null 2>&1 || true" >/dev/null
+        _success "Known hosts primed"
+    fi
+
+    _state_add_completed_step "3.3"
+    _log "STEP 3.3 COMPLETE: Destination key authorized on source"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 3.4 - Rsync htdocs from source to destination
+# Requires Step 3.1, 3.2, 3.3, 2.5
+# Uses SSH tunneling: rsync from source to local, pipe to destination
+# Or direct rsync if source can reach destination
+# -----------------------------------------------------------------------------
+function _step_3_4() {
+    _loading "Step 3.4: Syncing htdocs from source to destination"
+    _log "STEP 3.4: Syncing htdocs from source to destination"
+
+    local source_server_ip dest_server_ip source_htdocs_path dest_htdocs_path
+    source_server_ip=$(_state_read ".data.source_server_ip")
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+    source_htdocs_path=$(_state_read ".data.source_htdocs_path")
+    dest_htdocs_path=$(_state_read ".data.dest_htdocs_path")
+
+    if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
+        _error "Missing server IPs in state. Run Step 2.1 first."
+        _log "STEP 3.4 FAILED: Missing server IPs"
+        return 1
+    fi
+
+    if [[ -z "$source_htdocs_path" || -z "$dest_htdocs_path" ]]; then
+        _error "Missing htdocs paths in state. Run Step 2.5 first."
+        _log "STEP 3.4 FAILED: Missing htdocs paths"
+        return 1
+    fi
+
+    source_htdocs_path=$(_normalize_htdocs_path "$source_server_ip" "$source_htdocs_path" ".data.source_htdocs_path") || return 1
+    dest_htdocs_path=$(_normalize_htdocs_path "$dest_server_ip" "$dest_htdocs_path" ".data.dest_htdocs_path") || return 1
+
+    local ssh_user
+    ssh_user=$(_state_read ".data.ssh_user")
+    [[ -z "$ssh_user" ]] && ssh_user="${GPBC_SSH_USER:-root}"
+
+    local known_hosts_file
+    known_hosts_file="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
+
+    # Build SSH options for rsync
+    local ssh_opts="ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$known_hosts_file"
+
+    # Build rsync command
+    # --archive: -rlptgoD (recursive, links, permissions, times, group, owner, devices)
+    # --compress: compress during transfer
+    # --verbose: increase verbosity
+    # --progress: show progress during transfer
+    # --delete: delete extraneous files from destination
+    # --exclude: common exclusions for WordPress
+    local rsync_excludes=(
+        "--exclude=.git"
+        "--exclude=.gitignore"
+        "--exclude=.DS_Store"
+        "--exclude=wp-config.php"
+        "--exclude=.htaccess"
+        "--exclude=cache/"
+        "--exclude=wp-content/cache/"
+        "--exclude=wp-content/w3tc-config/"
+        "--exclude=wp-content/uploads/cache/"
+        "--exclude=wp-content/debug.log"
+    )
+
+    local rsync_opts="-avz --progress --delete ${rsync_excludes[*]}"
+
+    # Add --dry-run if DRY_RUN is enabled
+    if [[ "$DRY_RUN" == "1" ]]; then
+        rsync_opts="$rsync_opts --dry-run"
+        _dry_run_msg "rsync will run in dry-run mode"
+    fi
+
+    _loading2 "Source: $ssh_user@$source_server_ip:$source_htdocs_path/"
+    _loading2 "Dest:   $ssh_user@$dest_server_ip:$dest_htdocs_path/"
+    _verbose "rsync options: $rsync_opts"
+
+    # Method: Use rsync with SSH to pull from source to destination
+    # We run rsync from the local machine, connecting to both servers
+    # rsync -e ssh source:path/ -e ssh dest:path/ doesn't work directly
+    # Instead, we rsync from source to dest by running rsync ON the destination server
+    # pulling from the source server.
+
+    # First, check whether destination can SSH to source.
+    # By default we STOP if this is not possible.
+    # The relay fallback (pull to local, push to dest) is opt-in via --rsync-local.
+
+    _loading2 "Checking if destination can reach source (required for remote rsync)..."
+    local can_reach
+    can_reach=$(_ssh_capture "$dest_server_ip" "ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new $ssh_user@$source_server_ip 'echo ok' 2>/dev/null || echo 'CANNOT_REACH'")
+
+    if [[ "$can_reach" == "ok" ]]; then
+        # Destination can SSH to source - run rsync on destination pulling from source
+        _loading2 "Direct rsync: destination will pull from source"
+        _log "RSYNC: Direct mode - destination pulling from source"
+
+        local remote_rsync_cmd
+        remote_rsync_cmd="rsync $rsync_opts -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' $ssh_user@$source_server_ip:$source_htdocs_path/ $dest_htdocs_path/"
+
+        _debug "Remote rsync command: $remote_rsync_cmd"
+
+        # Run rsync on destination server
+        local rsync_output rsync_rc
+        rsync_output=$(_ssh_capture "$dest_server_ip" "$remote_rsync_cmd" 2>&1)
+        rsync_rc=$?
+
+        # Log the output
+        _log "RSYNC OUTPUT START"
+        echo "$rsync_output" | while IFS= read -r line; do
+            _log "  $line"
+        done
+        _log "RSYNC OUTPUT END (exit code: $rsync_rc)"
+
+        # Show truncated output to user
+        local line_count
+        line_count=$(echo "$rsync_output" | wc -l)
+        if [[ $line_count -gt 20 ]]; then
+            echo "$rsync_output" | head -10
+            _loading3 "... ($((line_count - 20)) more lines) ..."
+            echo "$rsync_output" | tail -10
+        else
+            echo "$rsync_output"
+        fi
+
+        if [[ $rsync_rc -ne 0 ]]; then
+            _error "rsync failed with exit code $rsync_rc"
+            _log "STEP 3.4 FAILED: rsync exit code $rsync_rc"
+            return 1
+        fi
+    else
+        _warning "Destination cannot SSH to source directly"
+
+        if [[ "$RSYNC_LOCAL" != "1" ]]; then
+            _error "Remote rsync requires destination->source SSH access"
+            _loading3 "Fix: allow SSH from destination to source (keys/known_hosts/firewall)"
+            _loading3 "Or re-run with --rsync-local to relay via local machine"
+            _log "STEP 3.4 FAILED: Destination cannot SSH to source; RSYNC_LOCAL=0"
+            return 1
+        fi
+
+        # Relay method through local machine (opt-in)
+        _loading2 "Relay rsync (--rsync-local): local machine will relay files"
+        _log "RSYNC: Relay mode - local machine relaying files"
+        _loading3 "This is slower but works without dest->source SSH"
+
+        # Create a temporary directory for relay
+        local tmp_dir
+        tmp_dir=$(mktemp -d -t gp-site-mig-rsync-XXXXXX)
+        _verbose "Temp directory: $tmp_dir"
+
+        # Step 1: rsync from source to local temp
+        _loading2 "Pulling from source to local..."
+        local pull_cmd
+        pull_cmd="rsync $rsync_opts -e \"$ssh_opts\" $ssh_user@$source_server_ip:$source_htdocs_path/ $tmp_dir/"
+
+        _debug "Pull command: $pull_cmd"
+
+        local pull_output pull_rc
+        pull_output=$(eval "$pull_cmd" 2>&1)
+        pull_rc=$?
+
+        _log "RSYNC PULL OUTPUT START"
+        echo "$pull_output" | while IFS= read -r line; do
+            _log "  $line"
+        done
+        _log "RSYNC PULL OUTPUT END (exit code: $pull_rc)"
+
+        if [[ $pull_rc -ne 0 ]]; then
+            _error "rsync pull from source failed with exit code $pull_rc"
+            rm -rf "$tmp_dir"
+            _log "STEP 3.4 FAILED: rsync pull exit code $pull_rc"
+            return 1
+        fi
+
+        _success "Pulled files from source"
+
+        # Step 2: rsync from local temp to destination
+        _loading2 "Pushing to destination..."
+        local push_cmd
+        push_cmd="rsync $rsync_opts -e \"$ssh_opts\" $tmp_dir/ $ssh_user@$dest_server_ip:$dest_htdocs_path/"
+
+        _debug "Push command: $push_cmd"
+
+        local push_output push_rc
+        push_output=$(eval "$push_cmd" 2>&1)
+        push_rc=$?
+
+        _log "RSYNC PUSH OUTPUT START"
+        echo "$push_output" | while IFS= read -r line; do
+            _log "  $line"
+        done
+        _log "RSYNC PUSH OUTPUT END (exit code: $push_rc)"
+
+        # Cleanup temp directory
+        rm -rf "$tmp_dir"
+
+        if [[ $push_rc -ne 0 ]]; then
+            _error "rsync push to destination failed with exit code $push_rc"
+            _log "STEP 3.4 FAILED: rsync push exit code $push_rc"
+            return 1
+        fi
+
+        _success "Pushed files to destination"
+    fi
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        _dry_run_msg "No files were actually transferred (dry-run mode)"
+    else
+        _success "Files synced successfully"
+    fi
+
+    _state_add_completed_step "3.4"
+    _log "STEP 3.4 COMPLETE: htdocs synced"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 3 - Wrapper that calls all sub-steps
+# Test rsync and migrate files
+# -----------------------------------------------------------------------------
+function _step_3() {
+    _loading "Step 3: Test Rsync and Migrate Files"
+    _log "STEP 3: Starting rsync and file migration"
+
+    _run_step "3.1" _step_3_1 || return 1
+    _run_step "3.2" _step_3_2 || return 1
+    _run_step "3.3" _step_3_3 || return 1
+    _run_step "3.4" _step_3_4 || return 1
+
+    _state_add_completed_step "3"
+    _log "STEP 3 COMPLETE: File migration done"
+    return 0
+}
+
 # -----------------------------------------------------------------------------
 # Argument Parsing
 # -----------------------------------------------------------------------------
@@ -1231,6 +1723,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -d|--debug)
             DEBUG="1"
+            shift
+            ;;
+        --rsync-local)
+            RSYNC_LOCAL="1"
             shift
             ;;
         --step)
@@ -1297,6 +1793,7 @@ _verbose "Destination Profile: $DEST_PROFILE"
 _verbose "Dry Run: $DRY_RUN"
 _verbose "Verbose: $VERBOSE"
 _verbose "Run Step: ${RUN_STEP:-all}"
+_verbose "Rsync Local Relay: $RSYNC_LOCAL"
 _verbose "State File: $STATE_FILE"
 _verbose "Log File: $LOG_FILE"
 
@@ -1328,6 +1825,7 @@ _debug "DEBUG: DRY_RUN=$DRY_RUN"
 _debug "DEBUG: VERBOSE=$VERBOSE"
 _debug "DEBUG: DEBUG=$DEBUG"
 _debug "DEBUG: RUN_STEP=$RUN_STEP"
+_debug "DEBUG: RSYNC_LOCAL=$RSYNC_LOCAL"
 _debug "DEBUG: SITE=$SITE"
 _debug "DEBUG: SOURCE_PROFILE=$SOURCE_PROFILE"
 _debug "DEBUG: DEST_PROFILE=$DEST_PROFILE"
@@ -1380,11 +1878,39 @@ if ! _run_step "2.4" _step_2_4; then
     exit 1
 fi
 
+# Step 3.1: Verify rsync on source
+if ! _run_step "3.1" _step_3_1; then
+    _error "Migration failed at Step 3.1"
+    _log "Migration FAILED at Step 3.1"
+    exit 1
+fi
+
+# Step 3.2: Verify rsync on destination
+if ! _run_step "3.2" _step_3_2; then
+    _error "Migration failed at Step 3.2"
+    _log "Migration FAILED at Step 3.2"
+    exit 1
+fi
+
+# Step 3.3: Authorize destination SSH key on source
+if ! _run_step "3.3" _step_3_3; then
+    _error "Migration failed at Step 3.3"
+    _log "Migration FAILED at Step 3.3"
+    exit 1
+fi
+
+# Step 3.4: Rsync htdocs
+if ! _run_step "3.4" _step_3_4; then
+    _error "Migration failed at Step 3.4"
+    _log "Migration FAILED at Step 3.4"
+    exit 1
+fi
+
 # Stop after the last implemented step.
 # If a specific step was requested and it's not implemented, fail clearly.
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|2|2.1|2.2|2.3|2.4|2.5)
+        1|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"
@@ -1394,5 +1920,5 @@ if [[ -n "$RUN_STEP" ]]; then
     esac
 fi
 
-_log "Stopping after Step 2.5 (remaining steps not implemented yet)"
+_log "Stopping after Step 3.4 (remaining steps not implemented yet)"
 exit 0

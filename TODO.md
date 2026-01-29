@@ -64,7 +64,12 @@
 #### Step 3 - Test Rsync and Migrate Files
 * **3.1** - Confirm rsync installed on source server
 * **3.2** - Confirm rsync installed on destination server, confirm htdocs access
-* **3.3** - Rsync htdocs from source to destination, log output
+* **3.3** - Ensure destination server can SSH to the source server (required for remote rsync)
+  * Remote rsync runs on the destination server and pulls from the source server over SSH
+  * If using root (default), copy destination `/root/.ssh/id_rsa.pub` into source `/root/.ssh/authorized_keys`
+  * If using a non-root SSH user (via `GPBC_SSH_USER`), copy that user's public key into the matching user's `~/.ssh/authorized_keys` on the source server
+  * Ensure the source server host key is accepted on the destination server (e.g., run `ssh <source_ip> exit` from the destination once)
+* **3.4** - Rsync htdocs from source to destination, log output
 * If anything fails, exit with error
 
 #### Step 4 - Migrate Database
@@ -151,14 +156,15 @@ Sample data for testing: ./gp-site-mig.sh -d -s aroconsulting.ca -sp BOLDLAYOUT 
 **Test:** Run each sub-step individually with `--step 2.1`, etc.; verify state updates
 **Note:** Until Step 3+ is implemented, the script should stop cleanly after Step 2.
 
-#### Phase 5 - Step 3 Implementation (Rsync)
+#### Phase 5 - Step 3 Implementation (Rsync) ✅
 **Goal:** Validate rsync and migrate files
-* [ ] Implement `_step_3_1()` - SSH to source, verify `which rsync`
-* [ ] Implement `_step_3_2()` - SSH to destination, verify rsync and htdocs writable
-* [ ] Implement `_step_3_3()` - Execute rsync with progress, log output
+* [x] Implement `_step_3_1()` - SSH to source, verify `which rsync`
+* [x] Implement `_step_3_2()` - SSH to destination, verify rsync and htdocs writable
+* [x] Implement `_step_3_3()` - Copy destination SSH public key to source authorized_keys (required for remote rsync)
+* [x] Implement `_step_3_4()` - Execute rsync with progress, log output
   * Use: `rsync -avz --progress -e ssh source:path/ dest:path/`
   * Respect DRY_RUN flag (add `--dry-run` to rsync)
-* [ ] Implement wrapper `_step_3()` that calls all sub-steps
+* [x] Implement wrapper `_step_3()` that calls all sub-steps
 
 **Test:** Run rsync in dry-run mode first; verify file transfer on test site
 
