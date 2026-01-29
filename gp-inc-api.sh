@@ -688,13 +688,22 @@ function _gp_api_list_domains () {
     
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
     
-    if [[ ! -f "$CACHE_FILE" ]]; then
-        _error "Domains cache not found. Run 'cache-domains' first."
+    # Check cache with user options for age and missing cache
+    _loading2 "Checking cache for domains data at $CACHE_FILE"
+    _check_cache_with_options "$CACHE_FILE" "domains"
+    local cache_status=$?
+    
+    if [[ $cache_status -eq 0 ]]; then
+        _debugf "Using cached domains data"
+        jq -r '.[] | .url // .domain_url // .name' "$CACHE_FILE" | sort -u
+        local total_domains
+        total_domains=$(jq 'length' "$CACHE_FILE")
+        _loading3 "Total domains found: $total_domains"
+        return 0
+    else
+        _error "Unable to proceed without domains cache."
         return 1
     fi
-    
-    jq -r '.[] | .url // .domain_url // .name' "$CACHE_FILE" | sort -u
-    return 0
 }
 
 # ======================================
@@ -708,13 +717,19 @@ function _gp_api_get_domains () {
     
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
     
-    if [[ ! -f "$CACHE_FILE" ]]; then
-        _error "Domains cache not found. Run 'cache-domains' first."
+    # Check cache with user options for age and missing cache
+    _loading2 "Checking cache for domains data at $CACHE_FILE"
+    _check_cache_with_options "$CACHE_FILE" "domains"
+    local cache_status=$?
+    
+    if [[ $cache_status -eq 0 ]]; then
+        _debugf "Using cached domains data"
+        cat "$CACHE_FILE"
+        return 0
+    else
+        _error "Unable to proceed without domains cache."
         return 1
     fi
-    
-    cat "$CACHE_FILE"
-    return 0
 }
 
 # ======================================
@@ -734,8 +749,12 @@ function _gp_api_get_domain () {
     
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
     
-    if [[ ! -f "$CACHE_FILE" ]]; then
-        _error "Domains cache not found. Run 'cache-domains' first."
+    # Check cache with user options for age and missing cache
+    _check_cache_with_options "$CACHE_FILE" "domains" > /dev/null 2>&1
+    local cache_status=$?
+    
+    if [[ $cache_status -ne 0 ]]; then
+        _error "Unable to proceed without domains cache."
         return 1
     fi
     
