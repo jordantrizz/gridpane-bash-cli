@@ -15,6 +15,7 @@ VERBOSE="0"
 DEBUG="0"
 RUN_STEP=""
 RSYNC_LOCAL="0"
+DB_FILE="0"
 SITE=""
 SOURCE_PROFILE=""
 DEST_PROFILE=""
@@ -39,6 +40,7 @@ function _usage() {
     echo "  -v,  --verbose                  Show detailed output"
     echo "  -d,  --debug                    Enable debug output"
     echo "  --rsync-local                    If server-to-server rsync fails, relay via local machine"
+    echo "  --db-file                       Use file-based DB migration (dump to file, gzip, transfer, import)"
     echo "  --step <step>                   Run a specific step only (e.g., 3 or 2.1)"
     echo "  -h,  --help                     Show this help message"
     echo
@@ -1751,58 +1753,164 @@ function _step_4() {
     local mysqldump_cmd="mysqldump --single-transaction --quick --lock-tables=false --routines --triggers $safe_source_db"
     local mysql_cmd="mysql $safe_dest_db"
 
-    _verbose "Database migration command:"
-    _verbose "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"$mysqldump_cmd\""
-    _verbose "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
-
-    if [[ "$DRY_RUN" == "1" ]]; then
-        _dry_run_msg "Would execute database migration:"
-        _dry_run_msg "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"$mysqldump_cmd\""
-        _dry_run_msg "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
-        _log "STEP 4 DRY-RUN: Would migrate database"
-        _state_add_completed_step "4"
-        echo
-        return 0
-    fi
-
-    _loading2 "Exporting database from source and importing to destination..."
-    _loading3 "This may take several minutes depending on database size..."
-
-    # Execute the database migration with error handling
-    # Use command arrays to avoid eval and properly handle arguments
-    local db_output db_rc
-    db_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "$mysqldump_cmd" 2>&1 | ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "$mysql_cmd" 2>&1)
-    db_rc=$?
-
-    # Log the output
-    _log "DATABASE MIGRATION OUTPUT START"
-    _log "$db_output"
-    _log "DATABASE MIGRATION OUTPUT END"
-
-    if [[ $db_rc -ne 0 ]]; then
-        _error "Database migration failed (exit code: $db_rc)"
-        if [[ -n "$db_output" ]]; then
-            _error "Error output:"
-            echo "$db_output" | while IFS= read -r line; do
-                _error "  $line"
+    # Check if file-based migration is requested
+    if [[ "$DB_FILE" == "1" ]]; then
+        _loading2 "Using file-based database migration (dump, gzip, transfer, import)"
+        
+        # Generate unique filename with timestamp
+        local timestamp
+        timestamp=$(date '+%Y%m%d-%H%M%S')
+        local db_filename="${source_db}_${timestamp}.sql.gz"
+        local source_db_path="/tmp/${db_filename}"
+        local dest_db_path="/tmp/${db_filename}"
+        
+        _verbose "Database file: $db_filename"
+        _verbose "Source path: $source_db_path"
+        _verbose "Dest path: $dest_db_path"
+        
+        if [[ "$DRY_RUN" == "1" ]]; then
+            _dry_run_msg "Would execute file-based database migration:"
+            _dry_run_msg "  1. ssh $ssh_user@$source_server_ip \"$mysqldump_cmd | gzip > $source_db_path\""
+            _dry_run_msg "  2. scp $ssh_user@$source_server_ip:$source_db_path $ssh_user@$dest_server_ip:$dest_db_path"
+            _dry_run_msg "  3. ssh $ssh_user@$dest_server_ip \"gunzip < $dest_db_path | $mysql_cmd\""
+            _dry_run_msg "  4. Cleanup temp files on both servers"
+            _log "STEP 4 DRY-RUN: Would migrate database via file"
+            _state_add_completed_step "4"
+            echo
+            return 0
+        fi
+        
+        _loading2 "Step 1/4: Dumping database on source and compressing..."
+        local dump_output dump_rc
+        dump_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "$mysqldump_cmd | gzip > $source_db_path" 2>&1)
+        dump_rc=$?
+        
+        _log "DATABASE DUMP OUTPUT: $dump_output"
+        
+        if [[ $dump_rc -ne 0 ]]; then
+            _error "Database dump failed (exit code: $dump_rc)"
+            [[ -n "$dump_output" ]] && _error "Output: $dump_output"
+            _log "STEP 4 FAILED: Database dump error (rc=$dump_rc)"
+            return 1
+        fi
+        _success "Database dumped and compressed on source"
+        
+        _loading2 "Step 2/4: Transferring compressed database file..."
+        local transfer_output transfer_rc
+        transfer_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "cat $source_db_path" 2>&1 | ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "cat > $dest_db_path" 2>&1)
+        transfer_rc=$?
+        
+        _log "DATABASE TRANSFER OUTPUT: $transfer_output"
+        
+        if [[ $transfer_rc -ne 0 ]]; then
+            _error "Database file transfer failed (exit code: $transfer_rc)"
+            [[ -n "$transfer_output" ]] && _error "Output: $transfer_output"
+            _log "STEP 4 FAILED: Database transfer error (rc=$transfer_rc)"
+            # Cleanup source file
+            ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
+            return 1
+        fi
+        _success "Database file transferred to destination"
+        
+        _loading2 "Step 3/4: Importing database on destination..."
+        local import_output import_rc
+        import_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "gunzip < $dest_db_path | $mysql_cmd" 2>&1)
+        import_rc=$?
+        
+        _log "DATABASE IMPORT OUTPUT START"
+        _log "$import_output"
+        _log "DATABASE IMPORT OUTPUT END"
+        
+        if [[ $import_rc -ne 0 ]]; then
+            _error "Database import failed (exit code: $import_rc)"
+            if [[ -n "$import_output" ]]; then
+                _error "Error output:"
+                echo "$import_output" | while IFS= read -r line; do
+                    _error "  $line"
+                done
+            fi
+            _log "STEP 4 FAILED: Database import error (rc=$import_rc)"
+            # Cleanup files on both servers
+            ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
+            ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "rm -f $dest_db_path" 2>/dev/null || true
+            return 1
+        fi
+        _success "Database imported successfully"
+        
+        _loading2 "Step 4/4: Cleaning up temporary files..."
+        ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
+        ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "rm -f $dest_db_path" 2>/dev/null || true
+        _success "Temporary files cleaned up"
+        
+        # Check if there were any warnings in the import output
+        if echo "$import_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -qv "0 warnings"; then
+            _warning "Database migration completed but with warnings:"
+            echo "$import_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -v "0 warnings" | while IFS= read -r line; do
+                _loading3 "  $line"
             done
         fi
-        _log "STEP 4 FAILED: Database migration error (rc=$db_rc)"
-        return 1
-    fi
+        
+        _success "Database migrated successfully via file transfer"
+        _loading3 "  Exported from: $source_db"
+        _loading3 "  Imported to:   $dest_db"
+        _loading3 "  Method: File-based (gzipped)"
+    else
+        # Original direct piping method
+        _loading2 "Using direct pipe database migration"
+        
+        _verbose "Database migration command:"
+        _verbose "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"$mysqldump_cmd\""
+        _verbose "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
 
-    # Check if there were any warnings in the output
-    # Look for actual MySQL warnings/errors, not just the words in general text
-    if echo "$db_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -qv "0 warnings"; then
-        _warning "Database migration completed but with warnings:"
-        echo "$db_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -v "0 warnings" | while IFS= read -r line; do
-            _loading3 "  $line"
-        done
-    fi
+        if [[ "$DRY_RUN" == "1" ]]; then
+            _dry_run_msg "Would execute database migration:"
+            _dry_run_msg "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"$mysqldump_cmd\""
+            _dry_run_msg "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
+            _log "STEP 4 DRY-RUN: Would migrate database"
+            _state_add_completed_step "4"
+            echo
+            return 0
+        fi
 
-    _success "Database migrated successfully"
-    _loading3 "  Exported from: $source_db"
-    _loading3 "  Imported to:   $dest_db"
+        _loading2 "Exporting database from source and importing to destination..."
+        _loading3 "This may take several minutes depending on database size..."
+
+        # Execute the database migration with error handling
+        # Use command arrays to avoid eval and properly handle arguments
+        local db_output db_rc
+        db_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "$mysqldump_cmd" 2>&1 | ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "$mysql_cmd" 2>&1)
+        db_rc=$?
+
+        # Log the output
+        _log "DATABASE MIGRATION OUTPUT START"
+        _log "$db_output"
+        _log "DATABASE MIGRATION OUTPUT END"
+
+        if [[ $db_rc -ne 0 ]]; then
+            _error "Database migration failed (exit code: $db_rc)"
+            if [[ -n "$db_output" ]]; then
+                _error "Error output:"
+                echo "$db_output" | while IFS= read -r line; do
+                    _error "  $line"
+                done
+            fi
+            _log "STEP 4 FAILED: Database migration error (rc=$db_rc)"
+            return 1
+        fi
+
+        # Check if there were any warnings in the output
+        # Look for actual MySQL warnings/errors, not just the words in general text
+        if echo "$db_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -qv "0 warnings"; then
+            _warning "Database migration completed but with warnings:"
+            echo "$db_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -v "0 warnings" | while IFS= read -r line; do
+                _loading3 "  $line"
+            done
+        fi
+
+        _success "Database migrated successfully"
+        _loading3 "  Exported from: $source_db"
+        _loading3 "  Imported to:   $dest_db"
+    fi
 
     _state_add_completed_step "4"
     _log "STEP 4 COMPLETE: Database migration successful"
@@ -1858,6 +1966,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rsync-local)
             RSYNC_LOCAL="1"
+            shift
+            ;;
+        --db-file)
+            DB_FILE="1"
             shift
             ;;
         --step)
