@@ -15,6 +15,8 @@ VERBOSE="0"
 DEBUG="0"
 RUN_STEP=""
 RSYNC_LOCAL="0"
+DB_FILE="0"
+FORCE_DB="0"
 SITE=""
 SOURCE_PROFILE=""
 DEST_PROFILE=""
@@ -39,6 +41,8 @@ function _usage() {
     echo "  -v,  --verbose                  Show detailed output"
     echo "  -d,  --debug                    Enable debug output"
     echo "  --rsync-local                    If server-to-server rsync fails, relay via local machine"
+    echo "  --db-file                       Use file-based DB migration (dump to file, gzip, transfer, import)"
+    echo "  --force-db                      Force database migration even if marker exists on destination"
     echo "  --step <step>                   Run a specific step only (e.g., 3 or 2.1)"
     echo "  -h,  --help                     Show this help message"
     echo
@@ -527,7 +531,17 @@ function _run_step() {
         if [[ "$RUN_STEP" == "$step_num" ]]; then
             _debug "Running requested step: $step_num"
             $step_func
-            return $?
+            local result=$?
+            if [[ $result -eq 0 ]]; then
+                _loading3 "Step $step_num completed successfully"
+                _state_add_completed_step "$step_num"
+                echo
+                _loading2 "Finished: Step $RUN_STEP completed"
+                exit 0
+            else
+                _error "Step $step_num failed"
+                return $result
+            fi
         elif [[ "$RUN_STEP" != *.* && "$step_num" == "$RUN_STEP."* ]]; then
             _debug "Running requested step group: $RUN_STEP (executing $step_num)"
             $step_func
@@ -1680,6 +1694,339 @@ function _step_3() {
 }
 
 # -----------------------------------------------------------------------------
+# Step 4 - Migrate Database
+# Export database from source using mysqldump, pipe to mysql on destination via SSH
+# Requires Step 2.1 (server IPs), Step 2.3 (database names)
+# -----------------------------------------------------------------------------
+function _step_4() {
+    _loading "Step 4: Migrating database"
+    _log "STEP 4: Starting database migration"
+
+    local source_server_ip dest_server_ip source_db dest_db
+    source_server_ip=$(_state_read ".data.source_server_ip")
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+    source_db=$(_state_read ".data.source_db_name")
+    dest_db=$(_state_read ".data.dest_db_name")
+
+    if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
+        _loading2 "Missing server IPs, running Step 2.1..."
+        if ! _step_2_1; then
+            _error "Failed to run prerequisite Step 2.1"
+            _log "STEP 4 FAILED: Prerequisite Step 2.1 failed"
+            return 1
+        fi
+        source_server_ip=$(_state_read ".data.source_server_ip")
+        dest_server_ip=$(_state_read ".data.dest_server_ip")
+    fi
+
+    if [[ -z "$source_db" || -z "$dest_db" ]]; then
+        # Step 2.3 requires Step 2.5 (site paths) first
+        local source_htdocs_path dest_htdocs_path
+        source_htdocs_path=$(_state_read ".data.source_htdocs_path")
+        dest_htdocs_path=$(_state_read ".data.dest_htdocs_path")
+        if [[ -z "$source_htdocs_path" || -z "$dest_htdocs_path" ]]; then
+            _loading2 "Missing site paths, running Step 2.5..."
+            if ! _step_2_5; then
+                _error "Failed to run prerequisite Step 2.5"
+                _log "STEP 4 FAILED: Prerequisite Step 2.5 failed"
+                return 1
+            fi
+        fi
+        _loading2 "Missing DB names, running Step 2.3..."
+        if ! _step_2_3; then
+            _error "Failed to run prerequisite Step 2.3"
+            _log "STEP 4 FAILED: Prerequisite Step 2.3 failed"
+            return 1
+        fi
+        source_db=$(_state_read ".data.source_db_name")
+        dest_db=$(_state_read ".data.dest_db_name")
+    fi
+
+    local ssh_user
+    ssh_user=$(_state_read ".data.ssh_user")
+    [[ -z "$ssh_user" ]] && ssh_user="${GPBC_SSH_USER:-root}"
+
+    local known_hosts_file
+    known_hosts_file="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
+
+    # Build SSH options array for proper argument handling
+    local ssh_opts_array=(-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts_file")
+
+    _loading2 "Source DB: $source_db on $ssh_user@$source_server_ip"
+    _loading2 "Dest DB:   $dest_db on $ssh_user@$dest_server_ip"
+
+    # Validate database names to prevent command injection
+    # Database names in MySQL can contain alphanumeric, underscore, and some special chars
+    # Check for presence of dangerous shell metacharacters
+    if [[ "$source_db" =~ [\$\;\|\&\`\<\>\(\)] ]]; then
+        _error "Source database name contains potentially unsafe characters: $source_db"
+        _log "STEP 4 FAILED: Unsafe source database name"
+        return 1
+    fi
+    
+    if [[ "$dest_db" =~ [\$\;\|\&\`\<\>\(\)] ]]; then
+        _error "Destination database name contains potentially unsafe characters: $dest_db"
+        _log "STEP 4 FAILED: Unsafe destination database name"
+        return 1
+    fi
+
+    # Build mysqldump command for source
+    # --single-transaction: for InnoDB tables, consistent backup without locking
+    # --quick: retrieve rows one at a time rather than all at once
+    # --lock-tables=false: don't lock tables (use with single-transaction)
+    # --routines: dump stored procedures and functions
+    # --triggers: dump triggers
+    # Note: GridPane servers typically have MySQL configured with defaults-file or socket auth
+    # If credentials are needed, they should be in ~/.my.cnf on the respective servers
+    
+    # Use printf to safely escape database name
+    local safe_source_db safe_dest_db
+    safe_source_db=$(printf '%q' "$source_db")
+    safe_dest_db=$(printf '%q' "$dest_db")
+    
+    local mysqldump_cmd="mysqldump --single-transaction --quick --lock-tables=false --routines --triggers $safe_source_db"
+    local mysql_cmd="mysql $safe_dest_db"
+
+    # Check if migration marker already exists in destination database
+    _loading2 "Checking for existing migration marker in destination..."
+    local existing_marker_sql="SELECT option_value FROM wp_options WHERE option_name='wp_miggp';"
+    local existing_marker existing_marker_rc
+    existing_marker=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "mysql -N $safe_dest_db -e \"$existing_marker_sql\"" 2>&1)
+    existing_marker_rc=$?
+
+    if [[ $existing_marker_rc -eq 0 && -n "$existing_marker" && "$existing_marker" == gpbc_mig_* ]]; then
+        _warning "Migration marker already exists in destination database!"
+        _warning "  Existing marker: $existing_marker"
+        _log "Existing migration marker found: $existing_marker"
+        
+        if [[ "$FORCE_DB" != "1" ]]; then
+            _error "Database migration aborted to prevent overwriting existing migration."
+            _error "Use --force-db to override this check and migrate anyway."
+            _log "STEP 4 ABORTED: Existing marker found, --force-db not set"
+            return 1
+        else
+            _warning "Proceeding with database migration (--force-db is set)"
+            _log "Proceeding despite existing marker (--force-db enabled)"
+        fi
+    else
+        _verbose "No existing migration marker found in destination"
+    fi
+
+    # Generate a unique migration marker ID to verify the migration
+    local migration_marker_id
+    migration_marker_id="gpbc_mig_$(date +%s)_$$_$RANDOM"
+    _loading2 "Inserting migration marker: $migration_marker_id"
+    _log "Migration marker ID: $migration_marker_id"
+
+    # Insert marker into source database wp_options table
+    local marker_insert_sql="INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('wp_miggp', '$migration_marker_id', 'no') ON DUPLICATE KEY UPDATE option_value='$migration_marker_id';"
+    local marker_output marker_rc
+    marker_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "mysql $safe_source_db -e \"$marker_insert_sql\"" 2>&1)
+    marker_rc=$?
+
+    if [[ $marker_rc -ne 0 ]]; then
+        _error "Failed to insert migration marker into source database"
+        [[ -n "$marker_output" ]] && _error "Output: $marker_output"
+        _log "STEP 4 FAILED: Could not insert migration marker"
+        return 1
+    fi
+    _verbose "Migration marker inserted into source database"
+
+    # Store marker ID in state for verification
+    _state_write ".data.migration_marker_id" "$migration_marker_id"
+
+    # Check if file-based migration is requested
+    if [[ "$DB_FILE" == "1" ]]; then
+        _loading2 "Using file-based database migration (dump, gzip, transfer, import)"
+        
+        # Generate unique filename with timestamp
+        local timestamp
+        timestamp=$(date '+%Y%m%d-%H%M%S')
+        local db_filename="${source_db}_${timestamp}.sql.gz"
+        local source_db_path="/tmp/${db_filename}"
+        local dest_db_path="/tmp/${db_filename}"
+        
+        _verbose "Database file: $db_filename"
+        _verbose "Source path: $source_db_path"
+        _verbose "Dest path: $dest_db_path"
+        
+        if [[ "$DRY_RUN" == "1" ]]; then
+            _dry_run_msg "Would execute file-based database migration:"
+            _dry_run_msg "  1. ssh $ssh_user@$source_server_ip \"$mysqldump_cmd | gzip > $source_db_path\""
+            _dry_run_msg "  2. scp $ssh_user@$source_server_ip:$source_db_path $ssh_user@$dest_server_ip:$dest_db_path"
+            _dry_run_msg "  3. ssh $ssh_user@$dest_server_ip \"gunzip < $dest_db_path | $mysql_cmd\""
+            _dry_run_msg "  4. Cleanup temp files on both servers"
+            _log "STEP 4 DRY-RUN: Would migrate database via file"
+            _state_add_completed_step "4"
+            echo
+            return 0
+        fi
+        
+        _loading2 "Step 1/4: Dumping database on source and compressing..."
+        local dump_output dump_rc
+        dump_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "$mysqldump_cmd | gzip > $source_db_path" 2>&1)
+        dump_rc=$?
+        
+        _log "DATABASE DUMP OUTPUT: $dump_output"
+        
+        if [[ $dump_rc -ne 0 ]]; then
+            _error "Database dump failed (exit code: $dump_rc)"
+            [[ -n "$dump_output" ]] && _error "Output: $dump_output"
+            _log "STEP 4 FAILED: Database dump error (rc=$dump_rc)"
+            return 1
+        fi
+        _success "Database dumped and compressed on source"
+        
+        _loading2 "Step 2/4: Transferring compressed database file..."
+        local transfer_output transfer_rc
+        transfer_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "cat $source_db_path" 2>&1 | ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "cat > $dest_db_path" 2>&1)
+        transfer_rc=$?
+        
+        _log "DATABASE TRANSFER OUTPUT: $transfer_output"
+        
+        if [[ $transfer_rc -ne 0 ]]; then
+            _error "Database file transfer failed (exit code: $transfer_rc)"
+            [[ -n "$transfer_output" ]] && _error "Output: $transfer_output"
+            _log "STEP 4 FAILED: Database transfer error (rc=$transfer_rc)"
+            # Cleanup source file
+            ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
+            return 1
+        fi
+        _success "Database file transferred to destination"
+        
+        _loading2 "Step 3/4: Importing database on destination..."
+        local import_output import_rc
+        import_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "gunzip < $dest_db_path | $mysql_cmd" 2>&1)
+        import_rc=$?
+        
+        _log "DATABASE IMPORT OUTPUT START"
+        _log "$import_output"
+        _log "DATABASE IMPORT OUTPUT END"
+        
+        if [[ $import_rc -ne 0 ]]; then
+            _error "Database import failed (exit code: $import_rc)"
+            if [[ -n "$import_output" ]]; then
+                _error "Error output:"
+                echo "$import_output" | while IFS= read -r line; do
+                    _error "  $line"
+                done
+            fi
+            _log "STEP 4 FAILED: Database import error (rc=$import_rc)"
+            # Cleanup files on both servers
+            ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
+            ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "rm -f $dest_db_path" 2>/dev/null || true
+            return 1
+        fi
+        _success "Database imported successfully"
+        
+        _loading2 "Step 4/4: Cleaning up temporary files..."
+        ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
+        ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "rm -f $dest_db_path" 2>/dev/null || true
+        _success "Temporary files cleaned up"
+        
+        # Check if there were any warnings in the import output
+        if echo "$import_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -qv "0 warnings"; then
+            _warning "Database migration completed but with warnings:"
+            echo "$import_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -v "0 warnings" | while IFS= read -r line; do
+                _loading3 "  $line"
+            done
+        fi
+        
+        _success "Database migrated successfully via file transfer"
+        _loading3 "  Exported from: $source_db"
+        _loading3 "  Imported to:   $dest_db"
+        _loading3 "  Method: File-based (gzipped)"
+    else
+        # Original direct piping method
+        _loading2 "Using direct pipe database migration"
+        
+        _verbose "Database migration command:"
+        _verbose "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"$mysqldump_cmd\""
+        _verbose "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
+
+        if [[ "$DRY_RUN" == "1" ]]; then
+            _dry_run_msg "Would execute database migration:"
+            _dry_run_msg "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"$mysqldump_cmd\""
+            _dry_run_msg "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
+            _log "STEP 4 DRY-RUN: Would migrate database"
+            _state_add_completed_step "4"
+            echo
+            return 0
+        fi
+
+        _loading2 "Exporting database from source and importing to destination..."
+        _loading3 "This may take several minutes depending on database size..."
+
+        # Execute the database migration with error handling
+        # Use command arrays to avoid eval and properly handle arguments
+        local db_output db_rc
+        db_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "$mysqldump_cmd" 2>&1 | ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "$mysql_cmd" 2>&1)
+        db_rc=$?
+
+        # Log the output
+        _log "DATABASE MIGRATION OUTPUT START"
+        _log "$db_output"
+        _log "DATABASE MIGRATION OUTPUT END"
+
+        if [[ $db_rc -ne 0 ]]; then
+            _error "Database migration failed (exit code: $db_rc)"
+            if [[ -n "$db_output" ]]; then
+                _error "Error output:"
+                echo "$db_output" | while IFS= read -r line; do
+                    _error "  $line"
+                done
+            fi
+            _log "STEP 4 FAILED: Database migration error (rc=$db_rc)"
+            return 1
+        fi
+
+        # Check if there were any warnings in the output
+        # Look for actual MySQL warnings/errors, not just the words in general text
+        if echo "$db_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -qv "0 warnings"; then
+            _warning "Database migration completed but with warnings:"
+            echo "$db_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -v "0 warnings" | while IFS= read -r line; do
+                _loading3 "  $line"
+            done
+        fi
+
+        _success "Database migrated successfully"
+        _loading3 "  Exported from: $source_db"
+        _loading3 "  Imported to:   $dest_db"
+    fi
+
+    # Verify migration by checking for the marker in destination database
+    _loading2 "Verifying migration marker in destination database..."
+    local verify_sql="SELECT option_value FROM wp_options WHERE option_name='wp_miggp';"
+    local verify_output verify_rc
+    verify_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "mysql -N $safe_dest_db -e \"$verify_sql\"" 2>&1)
+    verify_rc=$?
+
+    if [[ $verify_rc -ne 0 ]]; then
+        _warning "Could not verify migration marker (query failed)"
+        [[ -n "$verify_output" ]] && _warning "Output: $verify_output"
+        _log "Migration verification query failed: $verify_output"
+    elif [[ "$verify_output" == "$migration_marker_id" ]]; then
+        _success "Migration verified: marker found in destination database"
+        _loading3 "  Marker: $migration_marker_id"
+        _log "Migration verification SUCCESS: marker '$migration_marker_id' found"
+    else
+        _warning "Migration marker mismatch!"
+        _warning "  Expected: $migration_marker_id"
+        _warning "  Found:    $verify_output"
+        _log "Migration verification WARNING: marker mismatch (expected=$migration_marker_id, found=$verify_output)"
+    fi
+
+    # Clean up marker from source database (optional, keep it for audit trail)
+    # Uncomment the following to remove the marker:
+    # ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "mysql $safe_source_db -e \"DELETE FROM wp_options WHERE option_name='wp_miggp';\"" 2>/dev/null || true
+
+    _state_add_completed_step "4"
+    _log "STEP 4 COMPLETE: Database migration successful"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Argument Parsing
 # -----------------------------------------------------------------------------
 POSITIONAL=()
@@ -1727,6 +2074,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rsync-local)
             RSYNC_LOCAL="1"
+            shift
+            ;;
+        --db-file)
+            DB_FILE="1"
+            shift
+            ;;
+        --force-db)
+            FORCE_DB="1"
             shift
             ;;
         --step)
@@ -1906,11 +2261,18 @@ if ! _run_step "3.4" _step_3_4; then
     exit 1
 fi
 
+# Step 4: Migrate database
+if ! _run_step "4" _step_4; then
+    _error "Migration failed at Step 4"
+    _log "Migration FAILED at Step 4"
+    exit 1
+fi
+
 # Stop after the last implemented step.
 # If a specific step was requested and it's not implemented, fail clearly.
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4)
+        1|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"
@@ -1920,5 +2282,5 @@ if [[ -n "$RUN_STEP" ]]; then
     esac
 fi
 
-_log "Stopping after Step 3.4 (remaining steps not implemented yet)"
+_log "Stopping after Step 4 (remaining steps not implemented yet)"
 exit 0
