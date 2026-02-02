@@ -1680,6 +1680,116 @@ function _step_3() {
 }
 
 # -----------------------------------------------------------------------------
+# Step 4 - Migrate Database
+# Export database from source using mysqldump, pipe to mysql on destination via SSH
+# Requires Step 2.1 (server IPs), Step 2.3 (database names)
+# -----------------------------------------------------------------------------
+function _step_4() {
+    _loading "Step 4: Migrating database"
+    _log "STEP 4: Starting database migration"
+
+    local source_server_ip dest_server_ip source_db dest_db
+    source_server_ip=$(_state_read ".data.source_server_ip")
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+    source_db=$(_state_read ".data.source_db_name")
+    dest_db=$(_state_read ".data.dest_db_name")
+
+    if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
+        _error "Missing server IPs in state. Run Step 2.1 first."
+        _log "STEP 4 FAILED: Missing server IPs"
+        return 1
+    fi
+
+    if [[ -z "$source_db" || -z "$dest_db" ]]; then
+        _error "Missing DB names in state. Run Step 2.3 first."
+        _log "STEP 4 FAILED: Missing DB names"
+        return 1
+    fi
+
+    local ssh_user
+    ssh_user=$(_state_read ".data.ssh_user")
+    [[ -z "$ssh_user" ]] && ssh_user="${GPBC_SSH_USER:-root}"
+
+    local known_hosts_file
+    known_hosts_file="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
+
+    # Build SSH options
+    local ssh_opts="-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$known_hosts_file"
+
+    _loading2 "Source DB: $source_db on $ssh_user@$source_server_ip"
+    _loading2 "Dest DB:   $dest_db on $ssh_user@$dest_server_ip"
+
+    # Build mysqldump command for source
+    # --single-transaction: for InnoDB tables, consistent backup without locking
+    # --quick: retrieve rows one at a time rather than all at once
+    # --lock-tables=false: don't lock tables (use with single-transaction)
+    # --routines: dump stored procedures and functions
+    # --triggers: dump triggers
+    local mysqldump_cmd="mysqldump --single-transaction --quick --lock-tables=false --routines --triggers '$source_db'"
+
+    # Build mysql import command for destination
+    local mysql_cmd="mysql '$dest_db'"
+
+    # Full command: ssh to source, mysqldump, pipe via local to ssh destination, mysql
+    local full_cmd="ssh $ssh_opts $ssh_user@$source_server_ip \"$mysqldump_cmd\" | ssh $ssh_opts $ssh_user@$dest_server_ip \"$mysql_cmd\""
+
+    _verbose "Database migration command:"
+    _verbose "  $full_cmd"
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        _dry_run_msg "Would execute database migration:"
+        _dry_run_msg "  ssh $ssh_user@$source_server_ip \"$mysqldump_cmd\""
+        _dry_run_msg "  | ssh $ssh_user@$dest_server_ip \"$mysql_cmd\""
+        _log "STEP 4 DRY-RUN: Would migrate database"
+        _state_add_completed_step "4"
+        echo
+        return 0
+    fi
+
+    _loading2 "Exporting database from source and importing to destination..."
+    _loading3 "This may take several minutes depending on database size..."
+
+    # Execute the database migration with error handling
+    local db_output db_rc
+    db_output=$(eval "$full_cmd" 2>&1)
+    db_rc=$?
+
+    # Log the output
+    _log "DATABASE MIGRATION OUTPUT START"
+    _log "$db_output"
+    _log "DATABASE MIGRATION OUTPUT END"
+
+    if [[ $db_rc -ne 0 ]]; then
+        _error "Database migration failed (exit code: $db_rc)"
+        if [[ -n "$db_output" ]]; then
+            _error "Error output:"
+            echo "$db_output" | while IFS= read -r line; do
+                _error "  $line"
+            done
+        fi
+        _log "STEP 4 FAILED: Database migration error (rc=$db_rc)"
+        return 1
+    fi
+
+    # Check if there were any warnings in the output
+    if echo "$db_output" | grep -qi "warning\|error"; then
+        _warning "Database migration completed but with warnings:"
+        echo "$db_output" | grep -i "warning\|error" | while IFS= read -r line; do
+            _loading3 "  $line"
+        done
+    fi
+
+    _success "Database migrated successfully"
+    _loading3 "  Exported from: $source_db"
+    _loading3 "  Imported to:   $dest_db"
+
+    _state_add_completed_step "4"
+    _log "STEP 4 COMPLETE: Database migration successful"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Argument Parsing
 # -----------------------------------------------------------------------------
 POSITIONAL=()
@@ -1906,11 +2016,18 @@ if ! _run_step "3.4" _step_3_4; then
     exit 1
 fi
 
+# Step 4: Migrate database
+if ! _run_step "4" _step_4; then
+    _error "Migration failed at Step 4"
+    _log "Migration FAILED at Step 4"
+    exit 1
+fi
+
 # Stop after the last implemented step.
 # If a specific step was requested and it's not implemented, fail clearly.
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4)
+        1|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"
@@ -1920,5 +2037,5 @@ if [[ -n "$RUN_STEP" ]]; then
     esac
 fi
 
-_log "Stopping after Step 3.4 (remaining steps not implemented yet)"
+_log "Stopping after Step 4 (remaining steps not implemented yet)"
 exit 0
