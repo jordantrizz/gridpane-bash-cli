@@ -1719,27 +1719,46 @@ function _step_4() {
     _loading2 "Source DB: $source_db on $ssh_user@$source_server_ip"
     _loading2 "Dest DB:   $dest_db on $ssh_user@$dest_server_ip"
 
+    # Validate database names to prevent command injection
+    # Database names in MySQL can contain alphanumeric, underscore, and some special chars
+    # We'll validate they don't contain dangerous shell metacharacters
+    if [[ "$source_db" =~ [^\$] ]] || [[ "$source_db" =~ [\;\|\&\`] ]]; then
+        _error "Source database name contains potentially unsafe characters: $source_db"
+        _log "STEP 4 FAILED: Unsafe source database name"
+        return 1
+    fi
+    
+    if [[ "$dest_db" =~ [^\$] ]] || [[ "$dest_db" =~ [\;\|\&\`] ]]; then
+        _error "Destination database name contains potentially unsafe characters: $dest_db"
+        _log "STEP 4 FAILED: Unsafe destination database name"
+        return 1
+    fi
+
     # Build mysqldump command for source
     # --single-transaction: for InnoDB tables, consistent backup without locking
     # --quick: retrieve rows one at a time rather than all at once
     # --lock-tables=false: don't lock tables (use with single-transaction)
     # --routines: dump stored procedures and functions
     # --triggers: dump triggers
-    local mysqldump_cmd="mysqldump --single-transaction --quick --lock-tables=false --routines --triggers '$source_db'"
-
-    # Build mysql import command for destination
-    local mysql_cmd="mysql '$dest_db'"
-
-    # Full command: ssh to source, mysqldump, pipe via local to ssh destination, mysql
-    local full_cmd="ssh $ssh_opts $ssh_user@$source_server_ip \"$mysqldump_cmd\" | ssh $ssh_opts $ssh_user@$dest_server_ip \"$mysql_cmd\""
+    # Note: GridPane servers typically have MySQL configured with defaults-file or socket auth
+    # If credentials are needed, they should be in ~/.my.cnf on the respective servers
+    
+    # Use printf to safely escape database name
+    local safe_source_db safe_dest_db
+    safe_source_db=$(printf '%q' "$source_db")
+    safe_dest_db=$(printf '%q' "$dest_db")
+    
+    local mysqldump_cmd="mysqldump --single-transaction --quick --lock-tables=false --routines --triggers $safe_source_db"
+    local mysql_cmd="mysql $safe_dest_db"
 
     _verbose "Database migration command:"
-    _verbose "  $full_cmd"
+    _verbose "  ssh $ssh_opts $ssh_user@$source_server_ip \"$mysqldump_cmd\""
+    _verbose "  | ssh $ssh_opts $ssh_user@$dest_server_ip \"$mysql_cmd\""
 
     if [[ "$DRY_RUN" == "1" ]]; then
         _dry_run_msg "Would execute database migration:"
-        _dry_run_msg "  ssh $ssh_user@$source_server_ip \"$mysqldump_cmd\""
-        _dry_run_msg "  | ssh $ssh_user@$dest_server_ip \"$mysql_cmd\""
+        _dry_run_msg "  ssh $ssh_opts $ssh_user@$source_server_ip \"$mysqldump_cmd\""
+        _dry_run_msg "  | ssh $ssh_opts $ssh_user@$dest_server_ip \"$mysql_cmd\""
         _log "STEP 4 DRY-RUN: Would migrate database"
         _state_add_completed_step "4"
         echo
@@ -1750,8 +1769,9 @@ function _step_4() {
     _loading3 "This may take several minutes depending on database size..."
 
     # Execute the database migration with error handling
+    # Use command arrays to avoid eval and properly handle arguments
     local db_output db_rc
-    db_output=$(eval "$full_cmd" 2>&1)
+    db_output=$(ssh $ssh_opts "$ssh_user@$source_server_ip" "$mysqldump_cmd" 2>&1 | ssh $ssh_opts "$ssh_user@$dest_server_ip" "$mysql_cmd" 2>&1)
     db_rc=$?
 
     # Log the output
@@ -1772,9 +1792,10 @@ function _step_4() {
     fi
 
     # Check if there were any warnings in the output
-    if echo "$db_output" | grep -qi "warning\|error"; then
+    # Look for actual MySQL warnings/errors, not just the words in general text
+    if echo "$db_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -qv "0 warnings"; then
         _warning "Database migration completed but with warnings:"
-        echo "$db_output" | grep -i "warning\|error" | while IFS= read -r line; do
+        echo "$db_output" | grep -Ei "^(warning|error|failed|cannot|denied)" | grep -v "0 warnings" | while IFS= read -r line; do
             _loading3 "  $line"
         done
     fi
