@@ -1713,22 +1713,22 @@ function _step_4() {
     local known_hosts_file
     known_hosts_file="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
 
-    # Build SSH options
-    local ssh_opts="-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$known_hosts_file"
+    # Build SSH options array for proper argument handling
+    local ssh_opts_array=(-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts_file")
 
     _loading2 "Source DB: $source_db on $ssh_user@$source_server_ip"
     _loading2 "Dest DB:   $dest_db on $ssh_user@$dest_server_ip"
 
     # Validate database names to prevent command injection
     # Database names in MySQL can contain alphanumeric, underscore, and some special chars
-    # We'll validate they don't contain dangerous shell metacharacters
-    if [[ "$source_db" =~ [^\$] ]] || [[ "$source_db" =~ [\;\|\&\`] ]]; then
+    # Check for presence of dangerous shell metacharacters
+    if [[ "$source_db" =~ [\$\;\|\&\`\<\>\(\)] ]]; then
         _error "Source database name contains potentially unsafe characters: $source_db"
         _log "STEP 4 FAILED: Unsafe source database name"
         return 1
     fi
     
-    if [[ "$dest_db" =~ [^\$] ]] || [[ "$dest_db" =~ [\;\|\&\`] ]]; then
+    if [[ "$dest_db" =~ [\$\;\|\&\`\<\>\(\)] ]]; then
         _error "Destination database name contains potentially unsafe characters: $dest_db"
         _log "STEP 4 FAILED: Unsafe destination database name"
         return 1
@@ -1752,13 +1752,13 @@ function _step_4() {
     local mysql_cmd="mysql $safe_dest_db"
 
     _verbose "Database migration command:"
-    _verbose "  ssh $ssh_opts $ssh_user@$source_server_ip \"$mysqldump_cmd\""
-    _verbose "  | ssh $ssh_opts $ssh_user@$dest_server_ip \"$mysql_cmd\""
+    _verbose "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"$mysqldump_cmd\""
+    _verbose "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
 
     if [[ "$DRY_RUN" == "1" ]]; then
         _dry_run_msg "Would execute database migration:"
-        _dry_run_msg "  ssh $ssh_opts $ssh_user@$source_server_ip \"$mysqldump_cmd\""
-        _dry_run_msg "  | ssh $ssh_opts $ssh_user@$dest_server_ip \"$mysql_cmd\""
+        _dry_run_msg "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"$mysqldump_cmd\""
+        _dry_run_msg "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
         _log "STEP 4 DRY-RUN: Would migrate database"
         _state_add_completed_step "4"
         echo
@@ -1771,7 +1771,7 @@ function _step_4() {
     # Execute the database migration with error handling
     # Use command arrays to avoid eval and properly handle arguments
     local db_output db_rc
-    db_output=$(ssh $ssh_opts "$ssh_user@$source_server_ip" "$mysqldump_cmd" 2>&1 | ssh $ssh_opts "$ssh_user@$dest_server_ip" "$mysql_cmd" 2>&1)
+    db_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "$mysqldump_cmd" 2>&1 | ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "$mysql_cmd" 2>&1)
     db_rc=$?
 
     # Log the output
