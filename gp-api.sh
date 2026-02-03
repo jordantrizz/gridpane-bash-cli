@@ -83,6 +83,7 @@ function _usage() {
     echo "      cache-servers               - Cache servers from the API"
     echo "      cache-users                 - Cache system users from the API"
     echo "      cache-domains               - Cache domains from the API"
+    echo "      cache-all                   - Cache all data (sites, servers, users, domains)"
     echo "      clear-cache                 - Clear the cache"
     echo
     echo "  Documentation:"
@@ -350,6 +351,8 @@ elif [[ $CMD == "cache-users" ]]; then
     _gp_api_cache_users
 elif [[ $CMD == "cache-domains" ]]; then
     _gp_api_cache_domains
+elif [[ $CMD == "cache-all" ]]; then
+    _gp_api_cache_all
 elif [[ $CMD == "list-domains" ]]; then
     _gp_api_list_domains
 elif [[ $CMD == "get-domains-json" ]]; then

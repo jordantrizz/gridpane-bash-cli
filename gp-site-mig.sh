@@ -363,6 +363,31 @@ function _resolve_server_ip_for_profile() {
     jq --arg server_id "$server_id" -r '.[] | select(.id == (($server_id | tonumber)? // -1)) | .ip // empty' "$cache_file" 2>/dev/null | head -n1
 }
 
+function _system_user_cache_file_for_profile() {
+    local profile_name="$1"
+    echo "${CACHE_DIR}/${profile_name}_system-user.json"
+}
+
+function _resolve_system_user_name_for_profile() {
+    local profile_name="$1"
+    local system_user_id="$2"
+
+    local cache_file
+    cache_file=$(_system_user_cache_file_for_profile "$profile_name")
+
+    if [[ -z "$system_user_id" || "$system_user_id" == "null" ]]; then
+        echo "UNKNOWN"
+        return 0
+    fi
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "UNKNOWN"
+        return 0
+    fi
+
+    jq --arg user_id "$system_user_id" -r '.[] | select(.id == (($user_id | tonumber)? // -1)) | .username // empty' "$cache_file" 2>/dev/null | head -n1
+}
+
 # -----------------------------------------------------------------------------
 # Step 1 - Validate Input
 # Confirm site exists on both source and destination profiles via API
@@ -419,14 +444,21 @@ function _step_1() {
     source_server_id=$(echo "$source_site_data" | jq -r '.server_id')
     source_system_user_id=$(echo "$source_site_data" | jq -r '.system_user_id // "null"')
 
-    local source_server_label source_server_ip
+    local source_server_label source_server_ip source_system_user_name
     source_server_label=$(_resolve_server_label_for_profile "$SOURCE_PROFILE" "$source_server_id")
     source_server_ip=$(_resolve_server_ip_for_profile "$SOURCE_PROFILE" "$source_server_id")
+    source_system_user_name=$(_resolve_system_user_name_for_profile "$SOURCE_PROFILE" "$source_system_user_id")
 
     if [[ "$source_server_label" == "UNKNOWN" ]]; then
         _warning "Server cache missing for '$SOURCE_PROFILE' (cannot resolve server label)."
         _loading3 "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-servers"
         _log "STEP 1: Server cache missing for profile $SOURCE_PROFILE"
+    fi
+
+    if [[ "$source_system_user_name" == "UNKNOWN" || -z "$source_system_user_name" ]]; then
+        _warning "System user cache missing for '$SOURCE_PROFILE' (cannot resolve system user name)."
+        _loading3 "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-users"
+        _log "STEP 1: System user cache missing for profile $SOURCE_PROFILE"
     fi
     
     _debug "Source site_id: $source_site_id"
@@ -435,10 +467,12 @@ function _step_1() {
     _debug "Source server_label: $source_server_label"
     _debug "Source server_ip: $source_server_ip"
     _debug "Source system_user_id: $source_system_user_id"
+    _debug "Source system_user_name: $source_system_user_name"
     
     _success "Found site on source: $source_site_url (site_id=$source_site_id)"
     _loading3 "  Source server: $source_server_label (server_id=$source_server_id, ip=$source_server_ip)"
-    _log "Source site found: url=$source_site_url, id=$source_site_id, server_id=$source_server_id, server_label=$source_server_label, server_ip=$source_server_ip, system_user_id=$source_system_user_id"
+    _loading3 "  Source system user: $source_system_user_name (id=$source_system_user_id)"
+    _log "Source site found: url=$source_site_url, id=$source_site_id, server_id=$source_server_id, server_label=$source_server_label, server_ip=$source_server_ip, system_user_id=$source_system_user_id, system_user_name=$source_system_user_name"
     
     # --- Destination Profile ---
     _loading2 "Checking destination profile: $DEST_PROFILE"
@@ -484,14 +518,21 @@ function _step_1() {
     dest_server_id=$(echo "$dest_site_data" | jq -r '.server_id')
     dest_system_user_id=$(echo "$dest_site_data" | jq -r '.system_user_id // "null"')
 
-    local dest_server_label dest_server_ip
+    local dest_server_label dest_server_ip dest_system_user_name
     dest_server_label=$(_resolve_server_label_for_profile "$DEST_PROFILE" "$dest_server_id")
     dest_server_ip=$(_resolve_server_ip_for_profile "$DEST_PROFILE" "$dest_server_id")
+    dest_system_user_name=$(_resolve_system_user_name_for_profile "$DEST_PROFILE" "$dest_system_user_id")
 
     if [[ "$dest_server_label" == "UNKNOWN" ]]; then
         _warning "Server cache missing for '$DEST_PROFILE' (cannot resolve server label)."
         _loading3 "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-servers"
         _log "STEP 1: Server cache missing for profile $DEST_PROFILE"
+    fi
+
+    if [[ "$dest_system_user_name" == "UNKNOWN" || -z "$dest_system_user_name" ]]; then
+        _warning "System user cache missing for '$DEST_PROFILE' (cannot resolve system user name)."
+        _loading3 "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-users"
+        _log "STEP 1: System user cache missing for profile $DEST_PROFILE"
     fi
     
     _debug "Dest site_id: $dest_site_id"
@@ -500,10 +541,12 @@ function _step_1() {
     _debug "Dest server_label: $dest_server_label"
     _debug "Dest server_ip: $dest_server_ip"
     _debug "Dest system_user_id: $dest_system_user_id"
+    _debug "Dest system_user_name: $dest_system_user_name"
     
     _success "Found site on destination: $dest_site_url (site_id=$dest_site_id)"
     _loading3 "  Dest server: $dest_server_label (server_id=$dest_server_id, ip=$dest_server_ip)"
-    _log "Destination site found: url=$dest_site_url, id=$dest_site_id, server_id=$dest_server_id, server_label=$dest_server_label, server_ip=$dest_server_ip, system_user_id=$dest_system_user_id"
+    _loading3 "  Dest system user: $dest_system_user_name (id=$dest_system_user_id)"
+    _log "Destination site found: url=$dest_site_url, id=$dest_site_id, server_id=$dest_server_id, server_label=$dest_server_label, server_ip=$dest_server_ip, system_user_id=$dest_system_user_id, system_user_name=$dest_system_user_name"
     
     # Restore original profile
     GPBC_TOKEN="$saved_token"
@@ -517,12 +560,14 @@ function _step_1() {
     _state_write ".data.source_server_label" "$source_server_label"
     _state_write ".data.source_server_ip" "$source_server_ip"
     _state_write ".data.source_system_user_id" "$source_system_user_id"
+    _state_write ".data.source_system_user_name" "$source_system_user_name"
     _state_write ".data.dest_site_id" "$dest_site_id"
     _state_write ".data.dest_site_url" "$dest_site_url"
     _state_write ".data.dest_server_id" "$dest_server_id"
     _state_write ".data.dest_server_label" "$dest_server_label"
     _state_write ".data.dest_server_ip" "$dest_server_ip"
     _state_write ".data.dest_system_user_id" "$dest_system_user_id"
+    _state_write ".data.dest_system_user_name" "$dest_system_user_name"
     
     # Mark step complete
     _state_add_completed_step "1"
@@ -2391,6 +2436,134 @@ function _step_5() {
 }
 
 # -----------------------------------------------------------------------------
+# Step 6 - Copy user-config.php
+# Checks for user-config.php on source, backs up existing on destination,
+# then copies from source to destination
+# -----------------------------------------------------------------------------
+function _step_6() {
+    _loading "Step 6: Copy user-config.php"
+    _log "STEP 6: Starting user-config.php migration"
+
+    local source_server_ip dest_server_ip source_site_path dest_site_path
+    source_server_ip=$(_state_read ".data.source_server_ip")
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+    source_site_path=$(_state_read ".data.source_site_path")
+    dest_site_path=$(_state_read ".data.dest_site_path")
+
+    if [[ -z "$source_server_ip" || -z "$dest_server_ip" || -z "$source_site_path" || -z "$dest_site_path" ]]; then
+        _error "Missing required state data. Run Steps 2.1 and 2.5 first."
+        _log "STEP 6 FAILED: Missing prerequisite data"
+        return 1
+    fi
+
+    local source_user_config="${source_site_path}/user-config.php"
+    local dest_user_config="${dest_site_path}/user-config.php"
+
+    # Check if user-config.php exists on source
+    _loading2 "Checking for user-config.php on source..."
+    local check_cmd="test -f '$source_user_config' && echo 'exists' || echo 'missing'"
+    local source_check
+    source_check=$(_ssh_capture "$source_server_ip" "$check_cmd")
+    source_check=$(echo "$source_check" | tr -d '[:space:]')
+
+    if [[ "$source_check" != "exists" ]]; then
+        _loading3 "No user-config.php found on source server"
+        _log "STEP 6: No user-config.php on source, skipping"
+        _state_add_completed_step "6"
+        _success "Step 6 complete: No user-config.php to copy"
+        echo
+        return 0
+    fi
+
+    _loading2 "Found user-config.php on source"
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        _dry_run_msg "Would backup destination user-config.php (if exists)"
+        _dry_run_msg "Would copy user-config.php from source to destination"
+        _state_add_completed_step "6"
+        _success "Step 6 complete (dry-run)"
+        echo
+        return 0
+    fi
+
+    local ssh_user
+    ssh_user=$(_state_read ".data.ssh_user")
+    [[ -z "$ssh_user" ]] && ssh_user="${GPBC_SSH_USER:-root}"
+
+    local known_hosts_file="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
+    local ssh_opts=(-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts_file")
+
+    # Check if user-config.php exists on destination (for backup)
+    _loading2 "Checking for existing user-config.php on destination..."
+    local dest_check
+    dest_check=$(_ssh_capture "$dest_server_ip" "test -f '$dest_user_config' && echo 'exists' || echo 'missing'")
+    dest_check=$(echo "$dest_check" | tr -d '[:space:]')
+
+    if [[ "$dest_check" == "exists" ]]; then
+        # Show diff between source and destination
+        _loading2 "Comparing source and destination user-config.php..."
+        local source_content dest_content
+        source_content=$(ssh "${ssh_opts[@]}" "$ssh_user@$source_server_ip" "cat '$source_user_config'" 2>/dev/null)
+        dest_content=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "cat '$dest_user_config'" 2>/dev/null)
+
+        if [[ "$source_content" == "$dest_content" ]]; then
+            _loading3 "Files are identical, no changes needed"
+            _log "STEP 6: user-config.php files are identical, skipping"
+            _state_add_completed_step "6"
+            _success "Step 6 complete: user-config.php already in sync"
+            echo
+            return 0
+        fi
+
+        echo
+        echo "--- Differences between source and destination user-config.php ---"
+        diff --color=auto <(echo "$dest_content") <(echo "$source_content") || true
+        echo "--- End of diff (destination <- source) ---"
+        echo
+
+        # Backup existing file
+        local backup_file="${dest_site_path}/user-config-src-backup.php"
+
+        _loading2 "Backing up existing user-config.php to: user-config-src-backup.php"
+        local backup_cmd="cp '$dest_user_config' '$backup_file'"
+        local backup_output backup_rc
+        backup_output=$(_ssh_capture "$dest_server_ip" "$backup_cmd" 2>&1)
+        backup_rc=$?
+
+        if [[ $backup_rc -ne 0 ]]; then
+            _error "Failed to backup existing user-config.php (exit code: $backup_rc)"
+            [[ -n "$backup_output" ]] && _error "Output: $backup_output"
+            _log "STEP 6 WARNING: backup failed, continuing with copy"
+            _error_log "Step 6: Failed to backup user-config.php - $backup_output"
+        else
+            _verbose "Backup created: $backup_file"
+        fi
+    else
+        _verbose "No existing user-config.php on destination, skipping backup"
+    fi
+
+    # Copy user-config.php from source to destination
+    _loading2 "Copying user-config.php from source to destination..."
+    local transfer_output transfer_rc
+    transfer_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$source_server_ip" "cat '$source_user_config'" 2>&1 | \
+        ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "cat > '$dest_user_config'" 2>&1)
+    transfer_rc=$?
+
+    if [[ $transfer_rc -ne 0 ]]; then
+        _error "Failed to copy user-config.php (exit code: $transfer_rc)"
+        [[ -n "$transfer_output" ]] && _error "Output: $transfer_output"
+        _log "STEP 6 FAILED: copy failed"
+        return 1
+    fi
+
+    _state_add_completed_step "6"
+    _success "Step 6 complete: user-config.php copied successfully"
+    _log "STEP 6 COMPLETE: user-config.php migrated"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Argument Parsing
 # -----------------------------------------------------------------------------
 POSITIONAL=()
@@ -2496,6 +2669,36 @@ ERROR_LOG_FILE="${LOG_DIR}/gp-site-mig-${SITE}-${LOG_TIMESTAMP}_error.log"
 # -----------------------------------------------------------------------------
 _loading "GridPane Site Migration - $VERSION"
 _pre_flight_mig
+
+# Display migration summary
+echo
+echo "  Site:        $SITE"
+echo "  Source:      $SOURCE_PROFILE"
+echo "  Destination: $DEST_PROFILE"
+
+# Show server details if state file exists
+if [[ -f "$STATE_FILE" ]]; then
+    _src_name=$(_state_read ".data.source_server_name" 2>/dev/null)
+    _src_ip=$(_state_read ".data.source_server_ip" 2>/dev/null)
+    _dest_name=$(_state_read ".data.dest_server_name" 2>/dev/null)
+    _dest_ip=$(_state_read ".data.dest_server_ip" 2>/dev/null)
+    if [[ -n "$_src_ip" ]]; then
+        if [[ -n "$_src_name" ]]; then
+            echo "  Source Server:      $_src_name ($_src_ip)"
+        else
+            echo "  Source Server:      $_src_ip"
+        fi
+    fi
+    if [[ -n "$_dest_ip" ]]; then
+        if [[ -n "$_dest_name" ]]; then
+            echo "  Destination Server: $_dest_name ($_dest_ip)"
+        else
+            echo "  Destination Server: $_dest_ip"
+        fi
+    fi
+    unset _src_name _src_ip _dest_name _dest_ip
+fi
+echo
 
 # Initialize logging
 mkdir -p "$LOG_DIR"
@@ -2655,11 +2858,18 @@ if ! _run_step "5.3" _step_5_3; then
     exit 1
 fi
 
+# Step 6: Copy user-config.php
+if ! _run_step "6" _step_6; then
+    _error "Migration failed at Step 6"
+    _log "Migration FAILED at Step 6"
+    exit 1
+fi
+
 # Stop after the last implemented step.
 # If a specific step was requested and it's not implemented, fail clearly.
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.2|5.3)
+        1|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.2|5.3|6)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"
@@ -2669,5 +2879,5 @@ if [[ -n "$RUN_STEP" ]]; then
     esac
 fi
 
-_log "Stopping after Step 5 (remaining steps not implemented yet)"
+_log "Stopping after Step 6 (remaining steps not implemented yet)"
 exit 0

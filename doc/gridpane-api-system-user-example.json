@@ -1,0 +1,46 @@
+[
+  {
+    "id": 123456,
+    "username": "example-site",
+    "details": "\"Username updated: example-site | Password authentication: yes | SSH Access: true \"",
+    "status": "succeed",
+    "public_key": null,
+    "server_id": 12345,
+    "user_id": 100,
+    "restricted_site_id": null,
+    "restricted_path": null,
+    "sudo": false,
+    "ssh_access": true,
+    "password": "REDACTED",
+    "is_primary": true,
+    "is_primary_with_no_restricted_users": true,
+    "sites": [
+      {
+        "id": 654321,
+        "url": "example.com"
+      }
+    ]
+  },
+  {
+    "id": 123457,
+    "username": "staging-example",
+    "details": "\"Username updated: staging-example | Password authentication: yes | SSH Access: false \"",
+    "status": "succeed",
+    "public_key": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB...",
+    "server_id": 12345,
+    "user_id": 100,
+    "restricted_site_id": 654322,
+    "restricted_path": "/var/www/staging.example.com",
+    "sudo": false,
+    "ssh_access": false,
+    "password": null,
+    "is_primary": false,
+    "is_primary_with_no_restricted_users": false,
+    "sites": [
+      {
+        "id": 654322,
+        "url": "staging.example.com"
+      }
+    ]
+  }
+]
