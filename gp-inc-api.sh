@@ -382,7 +382,7 @@ function _gp_api_cache_sites () {
         # Single page - extract data array and save
         echo "$API_OUTPUT" | jq '.data' > "$CACHE_FILE"
         CACHE_ENABLED="$SAVED_CACHE_ENABLED"
-        _success "Successfully cached $TOTAL_ITEMS sites"
+        _success "Successfully cached $TOTAL_ITEMS sites to $CACHE_FILE"
         return 0
     fi
     
@@ -414,7 +414,7 @@ function _gp_api_cache_sites () {
     # Re-enable caching
     CACHE_ENABLED="$SAVED_CACHE_ENABLED"
     
-    _success "Successfully cached $TOTAL_ITEMS sites"
+    _success "Successfully cached $TOTAL_ITEMS sites to $CACHE_FILE"
     return 0
 }
 
@@ -458,7 +458,7 @@ function _gp_api_cache_servers () {
         # Single page - extract data array and save
         echo "$API_OUTPUT" | jq '.data' > "$CACHE_FILE"
         CACHE_ENABLED="$SAVED_CACHE_ENABLED"
-        _success "Successfully cached $TOTAL_ITEMS servers"
+        _success "Successfully cached $TOTAL_ITEMS servers to $CACHE_FILE"
         return 0
     fi
     
@@ -490,7 +490,7 @@ function _gp_api_cache_servers () {
     # Re-enable caching
     CACHE_ENABLED="$SAVED_CACHE_ENABLED"
     
-    _success "Successfully cached $TOTAL_ITEMS servers"
+    _success "Successfully cached $TOTAL_ITEMS servers to $CACHE_FILE"
     return 0
 }
 
@@ -534,7 +534,7 @@ function _gp_api_cache_users () {
         # Single page - extract data array and save
         echo "$API_OUTPUT" | jq '.data' > "$CACHE_FILE"
         CACHE_ENABLED="$SAVED_CACHE_ENABLED"
-        _success "Successfully cached $TOTAL_ITEMS system users"
+        _success "Successfully cached $TOTAL_ITEMS system users to $CACHE_FILE"
         return 0
     fi
     
@@ -566,7 +566,7 @@ function _gp_api_cache_users () {
     # Re-enable caching
     CACHE_ENABLED="$SAVED_CACHE_ENABLED"
     
-    _success "Successfully cached $TOTAL_ITEMS system users"
+    _success "Successfully cached $TOTAL_ITEMS system users to $CACHE_FILE"
     return 0
 }
 
@@ -669,7 +669,7 @@ function _gp_api_cache_domains () {
         # Single page - extract data array and save
         echo "$API_OUTPUT" | jq '.data' > "$CACHE_FILE"
         CACHE_ENABLED="$SAVED_CACHE_ENABLED"
-        _success "Successfully cached $TOTAL_ITEMS domains"
+        _success "Successfully cached $TOTAL_ITEMS domains to $CACHE_FILE"
         return 0
     fi
     
@@ -701,8 +701,71 @@ function _gp_api_cache_domains () {
     # Re-enable caching
     CACHE_ENABLED="$SAVED_CACHE_ENABLED"
     
-    _success "Successfully cached $TOTAL_ITEMS domains"
+    _success "Successfully cached $TOTAL_ITEMS domains to $CACHE_FILE"
     return 0
+}
+
+# ======================================
+# -- _gp_api_cache_all
+# -- Cache all data types from the GridPane API
+# -- Fetches sites, servers, users, and domains
+# ======================================
+function _gp_api_cache_all () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    _loading "Caching all data for profile: $GPBC_TOKEN_NAME"
+    echo
+    
+    local failed=0
+    
+    # Cache sites
+    _loading2 "1/4: Caching sites..."
+    if _gp_api_cache_sites; then
+        _success "Sites cached successfully"
+    else
+        _error "Failed to cache sites"
+        ((failed++))
+    fi
+    echo
+    
+    # Cache servers
+    _loading2 "2/4: Caching servers..."
+    if _gp_api_cache_servers; then
+        _success "Servers cached successfully"
+    else
+        _error "Failed to cache servers"
+        ((failed++))
+    fi
+    echo
+    
+    # Cache users
+    _loading2 "3/4: Caching users..."
+    if _gp_api_cache_users; then
+        _success "Users cached successfully"
+    else
+        _error "Failed to cache users"
+        ((failed++))
+    fi
+    echo
+    
+    # Cache domains
+    _loading2 "4/4: Caching domains..."
+    if _gp_api_cache_domains; then
+        _success "Domains cached successfully"
+    else
+        _error "Failed to cache domains"
+        ((failed++))
+    fi
+    echo
+    
+    if [[ $failed -eq 0 ]]; then
+        _success "All caches refreshed successfully"
+        return 0
+    else
+        _warning "$failed cache operation(s) failed"
+        return 1
+    fi
 }
 
 # ======================================
