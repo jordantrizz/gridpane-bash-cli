@@ -22,8 +22,6 @@ function gp_api () {
         _gp_select_token
     fi
 
-    _debugf "gp_api called with METHOD: $METHOD, ENDPOINT: $ENDPOINT, EXTRA: $EXTRA"
-
     while true; do
         [[ $DEBUGF == "1" ]] && set -x
         CURL_HEADERS=(-H "Authorization: Bearer $GPBC_TOKEN")
@@ -354,7 +352,7 @@ function _gp_api_cache_sites () {
     
     local ENDPOINT="/site"
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
-    local PER_PAGE="${GPBC_DEFAULT_PER_PAGE:-100}"
+    local PER_PAGE=500  # Use higher per_page for sites to reduce API calls
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
@@ -430,7 +428,7 @@ function _gp_api_cache_servers () {
     
     local ENDPOINT="/server"
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
-    local PER_PAGE="${GPBC_DEFAULT_PER_PAGE:-100}"
+    local PER_PAGE=500
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
@@ -453,6 +451,13 @@ function _gp_api_cache_servers () {
     LAST_PAGE=$(echo "$API_OUTPUT" | jq -r '.meta.last_page // "1"')
     TOTAL_ITEMS=$(echo "$API_OUTPUT" | jq -r '.meta.total // "0"')
     _debugf "Total servers: $TOTAL_ITEMS, Last page: $LAST_PAGE"
+    
+    # Check for 0 servers - this should never happen
+    if [[ "$TOTAL_ITEMS" -eq 0 ]]; then
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+        _warning "API returned 0 servers - not updating cache (this should never happen)"
+        return 1
+    fi
     
     if [[ $LAST_PAGE -le 1 ]]; then
         # Single page - extract data array and save
@@ -506,7 +511,7 @@ function _gp_api_cache_users () {
     
     local ENDPOINT="/system-user"
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_system-user.json"
-    local PER_PAGE="${GPBC_DEFAULT_PER_PAGE:-100}"
+    local PER_PAGE=500
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
@@ -641,7 +646,7 @@ function _gp_api_cache_domains () {
     
     local ENDPOINT="/domain"
     local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
-    local PER_PAGE=300  # Domains use higher limit due to larger dataset
+    local PER_PAGE=500
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
@@ -728,6 +733,7 @@ function _gp_api_cache_all () {
         ((failed++))
     fi
     echo
+    _pause_for_rate_limit 15 "between cache operations"
     
     # Cache servers
     _loading2 "2/4: Caching servers..."
@@ -738,6 +744,7 @@ function _gp_api_cache_all () {
         ((failed++))
     fi
     echo
+    _pause_for_rate_limit 15 "between cache operations"
     
     # Cache users
     _loading2 "3/4: Caching users..."
@@ -748,6 +755,7 @@ function _gp_api_cache_all () {
         ((failed++))
     fi
     echo
+    _pause_for_rate_limit 15 "between cache operations"
     
     # Cache domains
     _loading2 "4/4: Caching domains..."
@@ -897,11 +905,35 @@ function _gp_api_get_domain_formatted () {
     local DOMAIN_URL="$1"
     _debugf "${FUNCNAME[0]} called with DOMAIN_URL: $DOMAIN_URL"
     
-    local domain_json
-    domain_json=$(_gp_api_get_domain "$DOMAIN_URL")
-    local result=$?
+    # Select token BEFORE subshell call to preserve env vars
+    _gp_select_token
     
-    if [[ $result -ne 0 ]]; then
+    if [[ -z "$DOMAIN_URL" ]]; then
+        _error "Domain URL is required"
+        return 1
+    fi
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_domain.json"
+    
+    # Check cache with user options for age and missing cache
+    _loading2 "Checking domain cache at $CACHE_FILE"
+    _check_cache_with_options "$CACHE_FILE" "domains"
+    local cache_status=$?
+    
+    if [[ $cache_status -ne 0 ]]; then
+        _error "Unable to proceed without domains cache."
+        return 1
+    fi
+    
+    # Match by url, domain_url, or name field (handle potential nested array)
+    local domain_json
+    domain_json=$(jq --arg url "$DOMAIN_URL" '
+        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+        .[] | select(.url == $url or .domain_url == $url or .name == $url)
+    ' "$CACHE_FILE" 2>/dev/null)
+    
+    if [[ -z "$domain_json" ]]; then
+        _error "Domain not found: $DOMAIN_URL"
         return 1
     fi
     

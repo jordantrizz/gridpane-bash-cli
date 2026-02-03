@@ -13,7 +13,7 @@
 * Cache files are stored at `${CACHE_DIR}/${GPBC_TOKEN_NAME}_<endpoint>.json`
 * When adding a new cache type (e.g., "domains"), update the case statements in `_check_cache_with_options()` in `gp-inc.sh`
 * Use `_check_cache_with_options "$CACHE_FILE" "<type>"` for consistent cache prompting behavior
-* Default pagination is `GPBC_DEFAULT_PER_PAGE=100`, override per-function if needed (e.g., domains uses 300)
+* Default pagination is `GPBC_DEFAULT_PER_PAGE=500` for all cache operations
 
 ### API Responses
 * Some endpoints return nested arrays `[[ ... ]]` - handle with jq: `(if type == "array" and (.[0] | type) == "array" then .[0] else . end)`

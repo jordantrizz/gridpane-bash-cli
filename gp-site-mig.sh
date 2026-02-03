@@ -22,6 +22,8 @@ SOURCE_PROFILE=""
 DEST_PROFILE=""
 STATE_DIR="$SCRIPT_DIR/state"
 LOG_DIR="$SCRIPT_DIR/logs"
+DATA_FILE=""
+DATA_FORMAT=""
 
 # -----------------------------------------------------------------------------
 # Usage
@@ -44,6 +46,11 @@ function _usage() {
     echo "  --db-file                       Use file-based DB migration (dump to file, gzip, transfer, import)"
     echo "  --force-db                      Force database migration even if marker exists on destination"
     echo "  --step <step>                   Run a specific step only (e.g., 3 or 2.1)"
+    echo "  --json <file>                   Load site data from JSON file (bypasses API)"
+    echo "  --csv <file>                    Load site data from CSV file (bypasses API)"
+    echo "  --list-states                   List all migration state files"
+    echo "  --clear-state                   Clear state file for the specified site (-s required)"
+    echo "  --fix-state                     Deduplicate completed_steps in state file (-s required)"
     echo "  -h,  --help                     Show this help message"
     echo
     echo "Migration Steps:"
@@ -182,6 +189,112 @@ function _error_log() {
 }
 
 # -----------------------------------------------------------------------------
+# Load site data from JSON or CSV file (bypasses API)
+# Usage: _load_data_from_file "$SITE"
+# Populates state file with source and dest data from file
+# -----------------------------------------------------------------------------
+function _load_data_from_file() {
+    local site_domain="$1"
+    _debug "Loading data from $DATA_FORMAT file: $DATA_FILE for site: $site_domain"
+    
+    if [[ ! -f "$DATA_FILE" ]]; then
+        _error "Data file not found: $DATA_FILE"
+        return 1
+    fi
+    
+    local site_data
+    
+    if [[ "$DATA_FORMAT" == "json" ]]; then
+        # Load from JSON file - find site by url field
+        site_data=$(jq --arg domain "$site_domain" '.sites[] | select(.url == $domain)' "$DATA_FILE" 2>/dev/null)
+        
+        if [[ -z "$site_data" || "$site_data" == "null" ]]; then
+            _error "Site '$site_domain' not found in JSON file"
+            _error "Available sites: $(jq -r '.sites[].url' "$DATA_FILE" 2>/dev/null | tr '\n' ' ')"
+            return 1
+        fi
+        
+        # Extract source data
+        local source_site_id source_site_url source_server_id source_server_label source_server_ip
+        local source_system_user_id source_system_user_name
+        source_site_id=$(echo "$site_data" | jq -r '.source.site_id // "0"')
+        source_site_url=$(echo "$site_data" | jq -r '.url')
+        source_server_id=$(echo "$site_data" | jq -r '.source.server_id // "0"')
+        source_server_label=$(echo "$site_data" | jq -r '.source.server_label // "unknown"')
+        source_server_ip=$(echo "$site_data" | jq -r '.source.server_ip')
+        source_system_user_id=$(echo "$site_data" | jq -r '.source.system_user_id // "0"')
+        source_system_user_name=$(echo "$site_data" | jq -r '.source.system_user_name // "unknown"')
+        
+        # Extract dest data
+        local dest_site_id dest_site_url dest_server_id dest_server_label dest_server_ip
+        local dest_system_user_id dest_system_user_name
+        dest_site_id=$(echo "$site_data" | jq -r '.dest.site_id // "0"')
+        dest_site_url=$(echo "$site_data" | jq -r '.url')
+        dest_server_id=$(echo "$site_data" | jq -r '.dest.server_id // "0"')
+        dest_server_label=$(echo "$site_data" | jq -r '.dest.server_label // "unknown"')
+        dest_server_ip=$(echo "$site_data" | jq -r '.dest.server_ip')
+        dest_system_user_id=$(echo "$site_data" | jq -r '.dest.system_user_id // "0"')
+        dest_system_user_name=$(echo "$site_data" | jq -r '.dest.system_user_name // "unknown"')
+        
+    elif [[ "$DATA_FORMAT" == "csv" ]]; then
+        # Load from CSV file
+        # Expected format: url,source_site_id,source_server_id,source_server_label,source_server_ip,source_system_user_id,source_system_user_name,dest_site_id,dest_server_id,dest_server_label,dest_server_ip,dest_system_user_id,dest_system_user_name
+        local csv_line
+        csv_line=$(grep "^${site_domain}," "$DATA_FILE" | head -1)
+        
+        if [[ -z "$csv_line" ]]; then
+            _error "Site '$site_domain' not found in CSV file"
+            return 1
+        fi
+        
+        # Parse CSV line (simple approach - assumes no commas in values)
+        IFS=',' read -r source_site_url source_site_id source_server_id source_server_label source_server_ip source_system_user_id source_system_user_name dest_site_id dest_server_id dest_server_label dest_server_ip dest_system_user_id dest_system_user_name <<< "$csv_line"
+        dest_site_url="$source_site_url"
+    else
+        _error "Unknown data format: $DATA_FORMAT"
+        return 1
+    fi
+    
+    # Validate required fields
+    if [[ -z "$source_server_ip" || "$source_server_ip" == "null" ]]; then
+        _error "Source server IP is required"
+        return 1
+    fi
+    if [[ -z "$dest_server_ip" || "$dest_server_ip" == "null" ]]; then
+        _error "Destination server IP is required"
+        return 1
+    fi
+    
+    # Display loaded data
+    _success "Loaded site data from file: $source_site_url"
+    _loading3 "  Source: $source_server_label ($source_server_ip) - user: $source_system_user_name"
+    _loading3 "  Dest:   $dest_server_label ($dest_server_ip) - user: $dest_system_user_name"
+    
+    # Write to state file
+    _state_write ".data.source_site_id" "$source_site_id"
+    _state_write ".data.source_site_url" "$source_site_url"
+    _state_write ".data.source_server_id" "$source_server_id"
+    _state_write ".data.source_server_label" "$source_server_label"
+    _state_write ".data.source_server_ip" "$source_server_ip"
+    _state_write ".data.source_system_user_id" "$source_system_user_id"
+    _state_write ".data.source_system_user_name" "$source_system_user_name"
+    _state_write ".data.dest_site_id" "$dest_site_id"
+    _state_write ".data.dest_site_url" "$dest_site_url"
+    _state_write ".data.dest_server_id" "$dest_server_id"
+    _state_write ".data.dest_server_label" "$dest_server_label"
+    _state_write ".data.dest_server_ip" "$dest_server_ip"
+    _state_write ".data.dest_system_user_id" "$dest_system_user_id"
+    _state_write ".data.dest_system_user_name" "$dest_system_user_name"
+    _state_write ".data_source" "file:$DATA_FILE"
+    
+    # Mark step 1 as complete (data loaded from file replaces API validation)
+    _state_add_completed_step "1"
+    
+    _log "STEP 1: Site data loaded from file: $DATA_FILE"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # State Management Functions
 # -----------------------------------------------------------------------------
 
@@ -247,7 +360,7 @@ function _state_write() {
     _verbose "State updated: $jq_path = $value"
 }
 
-# Append step to completed_steps array
+# Append step to completed_steps array (only if not already present)
 # Usage: _state_add_completed_step "1" or _state_add_completed_step "2.1"
 function _state_add_completed_step() {
     local step="$1"
@@ -255,6 +368,14 @@ function _state_add_completed_step() {
     if [[ ! -f "$STATE_FILE" ]]; then
         _error "State file does not exist: $STATE_FILE"
         return 1
+    fi
+    
+    # Check if step already in completed_steps
+    local already_completed
+    already_completed=$(jq --arg step "$step" '.completed_steps // [] | index($step)' "$STATE_FILE" 2>/dev/null)
+    if [[ "$already_completed" != "null" && -n "$already_completed" ]]; then
+        _verbose "Step $step already marked complete, skipping"
+        return 0
     fi
     
     local tmp_file="${STATE_FILE}.tmp"
@@ -2406,7 +2527,18 @@ function _step_5_3() {
     fi
     _verbose "Archive transferred to destination: $dest_backup_path"
 
-    # Step 3: Cleanup source tar file (keep backup on destination)
+    # Step 3: Set ownership to destination system user
+    local dest_system_user_name
+    dest_system_user_name=$(_state_read ".data.dest_system_user_name")
+    if [[ -n "$dest_system_user_name" && "$dest_system_user_name" != "UNKNOWN" && "$dest_system_user_name" != "null" ]]; then
+        _loading2 "Setting ownership to $dest_system_user_name..."
+        _ssh_capture "$dest_server_ip" "chown '$dest_system_user_name:$dest_system_user_name' '$dest_backup_path'" 2>/dev/null || true
+        _verbose "Ownership set to $dest_system_user_name"
+    else
+        _verbose "Skipping chown (dest_system_user_name not set - re-run Step 1 with cache-users)"
+    fi
+
+    # Step 4: Cleanup source tar file (keep backup on destination)
     _loading2 "Cleaning up temporary files on source..."
     _ssh_capture "$source_server_ip" "rm -f '$source_tar_path'" 2>/dev/null || true
     _verbose "Source tar file cleaned up"
@@ -2621,6 +2753,38 @@ while [[ $# -gt 0 ]]; do
             FORCE_DB="1"
             shift
             ;;
+        --list-states)
+            LIST_STATES="1"
+            shift
+            ;;
+        --clear-state)
+            CLEAR_STATE="1"
+            shift
+            ;;
+        --fix-state)
+            FIX_STATE="1"
+            shift
+            ;;
+        --json)
+            if [[ -z "$2" || "$2" == -* ]]; then
+                _usage
+                _error "No JSON file provided after --json flag"
+                exit 1
+            fi
+            DATA_FILE="$2"
+            DATA_FORMAT="json"
+            shift 2
+            ;;
+        --csv)
+            if [[ -z "$2" || "$2" == -* ]]; then
+                _usage
+                _error "No CSV file provided after --csv flag"
+                exit 1
+            fi
+            DATA_FILE="$2"
+            DATA_FORMAT="csv"
+            shift 2
+            ;;
         --step)
             if [[ -z "$2" || "$2" == -* ]]; then
                 _usage
@@ -2643,15 +2807,102 @@ done
 set -- "${POSITIONAL[@]}"
 
 # -----------------------------------------------------------------------------
+# Handle --list-states (no site required)
+# -----------------------------------------------------------------------------
+if [[ "$LIST_STATES" == "1" ]]; then
+    echo "Migration State Files:"
+    echo
+    if [[ ! -d "$STATE_DIR" ]] || [[ -z "$(ls -A "$STATE_DIR" 2>/dev/null)" ]]; then
+        echo "  No state files found."
+        exit 0
+    fi
+    printf "  %-40s %s\n" "SITE" "COMPLETED STEPS"
+    printf "  %-40s %s\n" "----" "---------------"
+    for state_file in "$STATE_DIR"/gp-site-mig-*.json; do
+        [[ -f "$state_file" ]] || continue
+        site_name=$(basename "$state_file" | sed 's/gp-site-mig-//; s/.json//')
+        completed=$(jq -r '.completed_steps // [] | join(", ")' "$state_file" 2>/dev/null || echo "none")
+        [[ -z "$completed" ]] && completed="none"
+        printf "  %-40s %s\n" "$site_name" "$completed"
+    done
+    echo
+    exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# Handle --clear-state (requires -s site)
+# -----------------------------------------------------------------------------
+if [[ "$CLEAR_STATE" == "1" ]]; then
+    if [[ -z "$SITE" ]]; then
+        _error "--clear-state requires -s <site> to specify which state to clear"
+        exit 1
+    fi
+    SITE=$(_sanitize_domain "$SITE")
+    STATE_FILE="${STATE_DIR}/gp-site-mig-${SITE}.json"
+    KNOWN_HOSTS_FILE="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
+    
+    if [[ ! -f "$STATE_FILE" ]]; then
+        _error "No state file found for site: $SITE"
+        exit 1
+    fi
+    
+    echo "Clearing state for site: $SITE"
+    rm -f "$STATE_FILE" && echo "  Removed: $STATE_FILE"
+    [[ -f "$KNOWN_HOSTS_FILE" ]] && rm -f "$KNOWN_HOSTS_FILE" && echo "  Removed: $KNOWN_HOSTS_FILE"
+    _success "State cleared for $SITE"
+    exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# Handle --fix-state (requires -s site) - deduplicate completed_steps
+# -----------------------------------------------------------------------------
+if [[ "$FIX_STATE" == "1" ]]; then
+    if [[ -z "$SITE" ]]; then
+        _error "--fix-state requires -s <site> to specify which state to fix"
+        exit 1
+    fi
+    SITE=$(_sanitize_domain "$SITE")
+    STATE_FILE="${STATE_DIR}/gp-site-mig-${SITE}.json"
+    
+    if [[ ! -f "$STATE_FILE" ]]; then
+        _error "No state file found for site: $SITE"
+        exit 1
+    fi
+    
+    echo "Fixing state for site: $SITE"
+    local tmp_file="${STATE_FILE}.tmp"
+    # Deduplicate completed_steps array while preserving order
+    jq '.completed_steps = (.completed_steps | unique)' "$STATE_FILE" > "$tmp_file" \
+        && mv "$tmp_file" "$STATE_FILE"
+    
+    completed=$(jq -r '.completed_steps | join(", ")' "$STATE_FILE" 2>/dev/null)
+    echo "  Deduplicated completed_steps: $completed"
+    _success "State fixed for $SITE"
+    exit 0
+fi
+
+# -----------------------------------------------------------------------------
 # Validate Required Arguments
 # -----------------------------------------------------------------------------
-if [[ -z "$SITE" || -z "$SOURCE_PROFILE" || -z "$DEST_PROFILE" ]]; then
+# When using --json or --csv, profiles are optional (data comes from file)
+if [[ -n "$DATA_FILE" ]]; then
+    if [[ -z "$SITE" ]]; then
+        _usage
+        echo
+        _error "Missing required argument:"
+        _error "  -s, --site is required"
+        exit 1
+    fi
+    # Set placeholder profile names when using file-based data
+    [[ -z "$SOURCE_PROFILE" ]] && SOURCE_PROFILE="file-source"
+    [[ -z "$DEST_PROFILE" ]] && DEST_PROFILE="file-dest"
+elif [[ -z "$SITE" || -z "$SOURCE_PROFILE" || -z "$DEST_PROFILE" ]]; then
     _usage
     echo
     _error "Missing required arguments:"
     [[ -z "$SITE" ]] && _error "  -s, --site is required"
-    [[ -z "$SOURCE_PROFILE" ]] && _error "  -sp, --source-profile is required"
-    [[ -z "$DEST_PROFILE" ]] && _error "  -dp, --dest-profile is required"
+    [[ -z "$SOURCE_PROFILE" ]] && _error "  -sp, --source-profile is required (or use --json/--csv)"
+    [[ -z "$DEST_PROFILE" ]] && _error "  -dp, --dest-profile is required (or use --json/--csv)"
     exit 1
 fi
 
@@ -2673,8 +2924,12 @@ _pre_flight_mig
 # Display migration summary
 echo
 echo "  Site:        $SITE"
-echo "  Source:      $SOURCE_PROFILE"
-echo "  Destination: $DEST_PROFILE"
+if [[ -n "$DATA_FILE" ]]; then
+    echo "  Data Source: $DATA_FILE ($DATA_FORMAT)"
+else
+    echo "  Source:      $SOURCE_PROFILE"
+    echo "  Destination: $DEST_PROFILE"
+fi
 
 # Show server details if state file exists
 if [[ -f "$STATE_FILE" ]]; then
@@ -2760,11 +3015,26 @@ _debug "DEBUG: LOG_FILE=$LOG_FILE"
 # Execute Migration Steps
 # =============================================================================
 
-# Step 1: Validate Input
-if ! _run_step "1" _step_1; then
-    _error "Migration failed at Step 1"
-    _log "Migration FAILED at Step 1"
-    exit 1
+# Step 1: Validate Input (or load from file)
+if [[ -n "$DATA_FILE" ]]; then
+    # Load data from file instead of API
+    if ! _state_is_step_completed "1"; then
+        _loading "Step 1: Loading site data from file"
+        if ! _load_data_from_file "$SITE"; then
+            _error "Migration failed at Step 1 (file data load)"
+            _log "Migration FAILED at Step 1 (file data load)"
+            exit 1
+        fi
+    else
+        _loading3 "Step 1 already completed (data from file), skipping..."
+    fi
+else
+    # Use API-based validation
+    if ! _run_step "1" _step_1; then
+        _error "Migration failed at Step 1"
+        _log "Migration FAILED at Step 1"
+        exit 1
+    fi
 fi
 
 # Step 2.1: Resolve server IPs

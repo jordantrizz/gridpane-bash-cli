@@ -1,0 +1,43 @@
+{
+  "description": "Site migration data file - bypasses API when using --json flag",
+  "sites": [
+    {
+      "url": "example.com",
+      "source": {
+        "site_id": 12345,
+        "server_id": 100,
+        "server_label": "prod-server-01",
+        "server_ip": "192.168.1.10",
+        "system_user_id": 500,
+        "system_user_name": "example"
+      },
+      "dest": {
+        "site_id": 67890,
+        "server_id": 200,
+        "server_label": "staging-server-01",
+        "server_ip": "192.168.1.20",
+        "system_user_id": 600,
+        "system_user_name": "example"
+      }
+    },
+    {
+      "url": "another-site.com",
+      "source": {
+        "site_id": 11111,
+        "server_id": 100,
+        "server_label": "prod-server-01",
+        "server_ip": "192.168.1.10",
+        "system_user_id": 501,
+        "system_user_name": "anothersite"
+      },
+      "dest": {
+        "site_id": 22222,
+        "server_id": 201,
+        "server_label": "staging-server-02",
+        "server_ip": "192.168.1.21",
+        "system_user_id": 601,
+        "system_user_name": "anothersite"
+      }
+    }
+  ]
+}

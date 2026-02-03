@@ -1,0 +1,6 @@
+# Site migration data file - bypasses API when using --csv flag
+# Format: url,source_site_id,source_server_id,source_server_label,source_server_ip,source_system_user_id,source_system_user_name,dest_site_id,dest_server_id,dest_server_label,dest_server_ip,dest_system_user_id,dest_system_user_name
+#
+# Example entries:
+example.com,12345,100,prod-server-01,192.168.1.10,500,example,67890,200,staging-server-01,192.168.1.20,600,example
+another-site.com,11111,100,prod-server-01,192.168.1.10,501,anothersite,22222,201,staging-server-02,192.168.1.21,601,anothersite

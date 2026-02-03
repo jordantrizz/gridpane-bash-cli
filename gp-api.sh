@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/gp-inc-doc.sh"
 # -- Variables
 # =======================================
 GP_API_URL="https://my.gridpane.com/oauth/api/v1"
-GPBC_DEFAULT_PER_PAGE=100
+GPBC_DEFAULT_PER_PAGE=500
 export GPBC_DEFAULT_PER_PAGE
 RANDOM_NUM=$((RANDOM % 1000))
 REPORT_FILE="$DATA_DIR/$RANDOM_NUM.json"
