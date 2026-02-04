@@ -84,6 +84,153 @@ function _gp_test_token () {
 }
 
 # ======================================
+# -- _gp_api_get_current_user
+# -- Get current user account information (JSON)
+# ======================================
+function _gp_api_get_current_user () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    gp_api GET "/user"
+    if [[ $? -ne 0 ]]; then
+        _error "Failed to fetch current user: $API_ERROR"
+        return 1
+    fi
+    
+    echo "$API_OUTPUT" | jq '.'
+    return 0
+}
+
+# ======================================
+# -- _gp_api_get_current_user_formatted
+# -- Get current user account information (formatted)
+# ======================================
+function _gp_api_get_current_user_formatted () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    gp_api GET "/user"
+    if [[ $? -ne 0 ]]; then
+        _error "Failed to fetch current user: $API_ERROR"
+        return 1
+    fi
+    
+    _loading "Current User Account Information"
+    echo
+    
+    # Extract and display user fields
+    local data
+    data=$(echo "$API_OUTPUT" | jq -r '.data // .')
+    
+    printf "%-20s %s\n" "ID:" "$(echo "$data" | jq -r '.id // "N/A"')"
+    printf "%-20s %s\n" "Name:" "$(echo "$data" | jq -r '.name // "N/A"')"
+    printf "%-20s %s\n" "Email:" "$(echo "$data" | jq -r '.email // "N/A"')"
+    printf "%-20s %s\n" "Created:" "$(echo "$data" | jq -r '.created_at // "N/A"')"
+    printf "%-20s %s\n" "Updated:" "$(echo "$data" | jq -r '.updated_at // "N/A"')"
+    
+    # Check for teams if present
+    local teams_count
+    teams_count=$(echo "$data" | jq -r '.teams | length // 0' 2>/dev/null)
+    if [[ "$teams_count" -gt 0 ]]; then
+        echo
+        printf "%-20s %s\n" "Teams:" "$teams_count"
+        echo "$data" | jq -r '.teams[] | "  - \(.name // "Unknown") (ID: \(.id // "N/A"))"' 2>/dev/null
+    fi
+    
+    return 0
+}
+
+# ======================================
+# -- _gp_api_get_integrations
+# -- Get all integrations available to user (JSON)
+# ======================================
+function _gp_api_get_integrations () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    gp_api GET "/user/integrations"
+    if [[ $? -ne 0 ]]; then
+        _error "Failed to fetch integrations: $API_ERROR"
+        return 1
+    fi
+    
+    echo "$API_OUTPUT" | jq '.'
+    return 0
+}
+
+# ======================================
+# -- _gp_api_cache_integrations
+# -- Cache integrations from the API
+# ======================================
+function _gp_api_cache_integrations () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_integrations.json"
+    local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
+    
+    _loading "Fetching integrations from API"
+    
+    # Disable caching during fetch
+    CACHE_ENABLED="0"
+    
+    gp_api GET "/user/integrations"
+    if [[ $? -ne 0 ]]; then
+        CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+        _error "Failed to fetch integrations: $API_ERROR"
+        return 1
+    fi
+    
+    # Restore cache setting
+    CACHE_ENABLED="$SAVED_CACHE_ENABLED"
+    
+    # Extract integrations array and save to cache
+    echo "$API_OUTPUT" | jq '.integrations // .data // .' > "$CACHE_FILE"
+    
+    local total
+    total=$(jq 'if type == "array" then length else 1 end' "$CACHE_FILE" 2>/dev/null || echo "0")
+    _success "Successfully cached $total integrations to $CACHE_FILE"
+    
+    return 0
+}
+
+# ======================================
+# -- _gp_api_list_integrations
+# -- List integrations from cache (formatted)
+# ======================================
+function _gp_api_list_integrations () {
+    _debugf "${FUNCNAME[0]} called"
+    _gp_select_token
+    
+    local CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_integrations.json"
+    
+    if [[ ! -f "$CACHE_FILE" ]]; then
+        _error "Integrations cache not found. Run 'cache-integrations' first."
+        return 1
+    fi
+    
+    _loading "Integrations for profile: $GPBC_TOKEN_NAME"
+    echo
+    
+    # Print header
+    printf "%-8s %-15s %-35s %s\n" "ID" "SERVICE" "NAME" "REGION"
+    printf "%-8s %-15s %-35s %s\n" "--------" "---------------" "-----------------------------------" "----------"
+    
+    # Print integrations
+    jq -r '.[] | "\(.id)\t\(.integrated_service // "N/A")\t\(.integration_name // "N/A")\t\(.region // "-")"' "$CACHE_FILE" | \
+    while IFS=$'\t' read -r id service name region; do
+        printf "%-8s %-15s %-35s %s\n" "$id" "$service" "$name" "$region"
+    done
+    
+    echo
+    local total
+    total=$(jq 'length' "$CACHE_FILE" 2>/dev/null || echo "0")
+    _loading3 "Total integrations: $total"
+    
+    return 0
+}
+
+# ======================================
 # -- _gp_api_get_api_stats
 # -- Get live API statistics (bypasses cache)
 # -- Queries /site and /server with per_page=1 to get total counts
@@ -356,7 +503,7 @@ function _gp_api_cache_sites () {
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
-    _loading "Fetching all sites from API with pagination"
+    _loading "Fetching all sites from API with pagination (per_page=$PER_PAGE)"
     
     # Disable caching during pagination to avoid cache overwrite
     CACHE_ENABLED="0"
@@ -432,7 +579,7 @@ function _gp_api_cache_servers () {
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
-    _loading "Fetching all servers from API with pagination"
+    _loading "Fetching all servers from API with pagination (per_page=$PER_PAGE)"
     
     # Disable caching during pagination to avoid cache overwrite
     CACHE_ENABLED="0"
@@ -515,7 +662,7 @@ function _gp_api_cache_users () {
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
-    _loading "Fetching all system users from API with pagination"
+    _loading "Fetching all system users from API with pagination (per_page=$PER_PAGE)"
     
     # Disable caching during pagination to avoid cache overwrite
     CACHE_ENABLED="0"
@@ -650,7 +797,7 @@ function _gp_api_cache_domains () {
     local LAST_PAGE
     local SAVED_CACHE_ENABLED="$CACHE_ENABLED"
     
-    _loading "Fetching all domains from API with pagination"
+    _loading "Fetching all domains from API with pagination (per_page=$PER_PAGE)"
     
     # Disable caching during pagination to avoid cache overwrite
     CACHE_ENABLED="0"
@@ -804,9 +951,10 @@ function _gp_api_list_domains () {
         # Output initial header
         _print_domain_header
         # Handle potential nested array from API and output data
+        # Use flatten to handle both flat arrays and nested page arrays
         local line_count=0
         jq -r '
-            (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+            flatten |
             .[] | 
             "\(.id // "N/A")|\(.url // "N/A")|\(.route // "none")|\(.is_ssl // false)|\(.is_wildcard // false)|\(.site_id // "N/A")|\(.dns_management_id // "N/A")|\(.user_dns.integration_name // "N/A")|\(.user_dns.provider.name // "N/A")"
         ' "$CACHE_FILE" | sort -t'|' -k2 | while IFS='|' read -r id url route is_ssl is_wildcard site_id dns_id integration provider; do
@@ -819,7 +967,7 @@ function _gp_api_list_domains () {
             fi
         done
         local total_domains
-        total_domains=$(jq '(if type == "array" and (.[0] | type) == "array" then .[0] else . end) | length' "$CACHE_FILE")
+        total_domains=$(jq 'flatten | length' "$CACHE_FILE")
         _loading3 "Total domains found: $total_domains"
         return 0
     else
@@ -881,10 +1029,10 @@ function _gp_api_get_domain () {
     fi
     
     # Match by url, domain_url, or name field (handle potential nested array)
+    # Use flatten to handle both flat arrays and nested page arrays
     local result
     result=$(jq --arg url "$DOMAIN_URL" '
-        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
-        .[] | select(.url == $url or .domain_url == $url or .name == $url)
+        flatten | .[] | select(.url == $url or .domain_url == $url or .name == $url)
     ' "$CACHE_FILE" 2>/dev/null)
     
     if [[ -z "$result" ]]; then
@@ -926,10 +1074,10 @@ function _gp_api_get_domain_formatted () {
     fi
     
     # Match by url, domain_url, or name field (handle potential nested array)
+    # Use flatten to handle both flat arrays and nested page arrays
     local domain_json
     domain_json=$(jq --arg url "$DOMAIN_URL" '
-        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
-        .[] | select(.url == $url or .domain_url == $url or .name == $url)
+        flatten | .[] | select(.url == $url or .domain_url == $url or .name == $url)
     ' "$CACHE_FILE" 2>/dev/null)
     
     if [[ -z "$domain_json" ]]; then
@@ -993,8 +1141,9 @@ function _gp_api_get_domains_for_site () {
         return 0
     fi
     
+    # Use flatten to handle both flat arrays and nested page arrays
     jq --arg sid "$SITE_ID" '
-        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+        flatten |
         [ .[] | select(.site_id == ($sid | tonumber)) ]
     ' "$CACHE_FILE" 2>/dev/null
     return 0
@@ -1020,10 +1169,10 @@ function _gp_api_get_primary_domain_for_site () {
         return 1
     fi
     
-    # Try to get primary domain first (handle potential nested array)
+    # Try to get primary domain first (use flatten to handle nested arrays)
     local primary
     primary=$(jq -r --arg sid "$SITE_ID" '
-        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+        flatten |
         .[] | select(.site_id == ($sid | tonumber) and .type == "primary") | .url // .domain_url // .name
     ' "$CACHE_FILE" 2>/dev/null | head -1)
     
@@ -1032,10 +1181,10 @@ function _gp_api_get_primary_domain_for_site () {
         return 0
     fi
     
-    # Fallback to first alias (handle potential nested array)
+    # Fallback to first alias (use flatten to handle nested arrays)
     local alias_domain
     alias_domain=$(jq -r --arg sid "$SITE_ID" '
-        (if type == "array" and (.[0] | type) == "array" then .[0] else . end) |
+        flatten |
         .[] | select(.site_id == ($sid | tonumber)) | .url // .domain_url // .name
     ' "$CACHE_FILE" 2>/dev/null | head -1)
     
@@ -2181,14 +2330,13 @@ function _gp_api_add_site () {
                 echo "$API_OUTPUT" | jq -r '.errors | to_entries[] | .key as $field | .value[] | "  - \($field): \(.)"' 2>/dev/null | while read -r line; do
                     _error "$line"
                 done
-            else
-                # Fallback to raw JSON output if not structured errors
-                echo "$API_OUTPUT" | jq -r '.' 2>/dev/null || echo "$API_OUTPUT"
             fi
+            # Always output raw API response for logging
+            _error "Full API Response: $API_OUTPUT"
         fi
         
         _warning "Valid PM values: dynamic, static, ondemand"
-        _warning "Valid PHP versions: 7.2, 7.3, 7.4"
+        _warning "Valid PHP versions: 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4"
         _warning "Valid nginx_caching values: redis, fastcgi, none"
         _warning "Server must be Nginx and must belong to your account"
         
@@ -2293,6 +2441,28 @@ function _gp_csv_add_sites () {
         fi
     fi
     
+    # Define cache files
+    local SITE_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_site.json"
+    local SERVER_CACHE_FILE="${CACHE_DIR}/${GPBC_TOKEN_NAME}_server.json"
+    
+    # Check sites cache is up to date
+    _loading2 "Checking sites cache at $SITE_CACHE_FILE"
+    _check_cache_with_options "$SITE_CACHE_FILE" "sites"
+    local sites_cache_status=$?
+    if [[ $sites_cache_status -ne 0 ]]; then
+        _error "Sites cache is required. Cannot proceed with add-site-csv."
+        return 1
+    fi
+    
+    # Check servers cache is up to date
+    _loading2 "Checking servers cache at $SERVER_CACHE_FILE"
+    _check_cache_with_options "$SERVER_CACHE_FILE" "servers"
+    local servers_cache_status=$?
+    if [[ $servers_cache_status -ne 0 ]]; then
+        _error "Servers cache is required. Cannot proceed with add-site-csv."
+        return 1
+    fi
+    
     # Check for existing progress file
     if [[ -f "$PROGRESS_FILE" ]]; then
         local PROGRESS_COUNT=$(wc -l < "$PROGRESS_FILE")
@@ -2323,10 +2493,16 @@ function _gp_csv_add_sites () {
     while IFS=',' read -r line; do
         ((LINE_NUM++))
         
-        # Skip header row (first line)
+        # Check if first line is a header row (skip if it contains "domain" or doesn't look like data)
         if [[ $LINE_NUM -eq 1 ]]; then
-            _log "Header: $line"
-            continue
+            # Check if first field looks like a header (contains "domain", "url", "site", etc.)
+            local first_field=$(echo "$line" | cut -d',' -f1 | tr '[:upper:]' '[:lower:]')
+            if [[ "$first_field" =~ ^(domain|url|site|hostname)$ ]]; then
+                _log "Header detected, skipping: $line"
+                continue
+            fi
+            # First line is data, process it
+            _log "No header row detected, processing first line as data"
         fi
         
         # Skip empty lines
@@ -2369,30 +2545,28 @@ function _gp_csv_add_sites () {
             continue
         fi
         
-        # Check if site already exists using live API
-        _cache "Checking if site already exists..."
+        # Check if site already exists using cache lookup
+        _cache "Checking if site already exists in cache..."
         _log "CACHE: Checking if site already exists via cache lookup..."
         
-        # Use _gp_api_get_site_live which checks cache for ID then validates via API
+        # Use cache lookup to check if site exists
         local SITE_CHECK
-        SITE_CHECK=$(_gp_api_get_site_live "$DOMAIN" 2>&1)
-        local SITE_CHECK_RC=$?
+        SITE_CHECK=$(jq --arg domain "$DOMAIN" '[.[] | select(.url == $domain)] | length' "$SITE_CACHE_FILE" 2>/dev/null)
         
-        if [[ $SITE_CHECK_RC -eq 0 ]]; then
-            # Site exists - skip it
-            _live "Site already exists (confirmed via API)"
-            _log "LIVE: Site already exists (confirmed via API) - skipping"
-            _pause_for_rate_limit 5 "site exists, skipping"
+        if [[ "$SITE_CHECK" -gt 0 ]]; then
+            # Site exists in cache - skip it
+            ((SKIPPED_COUNT++))
+            _cache "Site already exists (found in cache)"
+            _log "CACHE: Site already exists (found in cache) - skipping"
             continue
         else
-            # Site doesn't exist
-            _debugf "Site does not exist (API check failed), proceeding with creation"
+            # Site doesn't exist in cache
+            _debugf "Site not found in cache, proceeding with creation"
             _log "DEBUG: Site does not exist or not in cache - proceeding with creation"
         fi
         
         # Site doesn't exist - proceed with creation
         _log "Site does not exist, proceeding with creation..."
-        _pause_for_rate_limit 5 "before creating site"
         
         # Show API call details
         _live "Sending API request to GridPane..."

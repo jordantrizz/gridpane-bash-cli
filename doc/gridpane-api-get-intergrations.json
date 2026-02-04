@@ -1,0 +1,54 @@
+Using profile: CYBER
+{
+  "success": true,
+  "user_id": 1356,
+  "integrations": [
+    {
+      "id": 2367,
+      "dns_provider_id": 2,
+      "integrated_service": "cloudflare",
+      "integration_name": "Knight of Alderaan Major",
+      "token": "nv34b5345b345324b345b234b",
+      "secret_token": "email@domain.com",
+      "nameserver": null,
+      "challenge_domain": null
+    },
+    {
+      "id": 18726,
+      "dns_provider_id": 2,
+      "integrated_service": "cloudflare",
+      "integration_name": "statusforward.com",
+      "token": "234b34b5345b324b234b",
+      "secret_token": "email2@domain.com",
+      "nameserver": null,
+      "challenge_domain": null
+    },
+    {
+      "id": 1156,
+      "service_id": 1,
+      "integrated_service": "vultr",
+      "integration_name": "Count Rakghoul's Bane",
+      "token": "234b234b5324b52345324b5",
+      "secret_token": null,
+      "region": null
+    },
+    {
+      "id": 2783,
+      "service_id": 6,
+      "integrated_service": "wasabi",
+      "integration_name": "Red Rhombus The Uncomprimising",
+      "token": "243b324b5234b5234b2345b",
+      "secret_token": "2b3b532b5324b532325b",
+      "region": "us-east-2"
+    },
+    {
+      "id": 3847,
+      "service_id": 3,
+      "integrated_service": "backblaze",
+      "integration_name": "Elite Warlord Merciless",
+      "token": "2bb52345b2345b3b5",
+      "secret_token": "2342345b32435b3425",
+      "region": null
+    }
+  ]
+}

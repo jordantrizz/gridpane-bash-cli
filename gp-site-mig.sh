@@ -4,6 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOKEN_FILE="$HOME/.gridpane"
 CACHE_DIR="$HOME/.gpbc-cache"
 VERSION="$(cat $SCRIPT_DIR/VERSION)"
+GP_API_URL="https://my.gridpane.com/oauth/api/v1"
 
 # Source shared functions
 source "$SCRIPT_DIR/gp-inc.sh"
@@ -17,6 +18,9 @@ RUN_STEP=""
 RSYNC_LOCAL="0"
 DB_FILE="0"
 FORCE_DB="0"
+SKIP_DB="0"
+DNS_INTEGRATION_ID=""
+DNS_INTEGRATION_SKIP="0"
 SITE=""
 SOURCE_PROFILE=""
 DEST_PROFILE=""
@@ -45,9 +49,12 @@ function _usage() {
     echo "  --rsync-local                    If server-to-server rsync fails, relay via local machine"
     echo "  --db-file                       Use file-based DB migration (dump to file, gzip, transfer, import)"
     echo "  --force-db                      Force database migration even if marker exists on destination"
+    echo "  --skip-db                       Skip database migration if marker already exists (continue to next step)"
     echo "  --step <step>                   Run a specific step only (e.g., 3 or 2.1)"
     echo "  --json <file>                   Load site data from JSON file (bypasses API)"
     echo "  --csv <file>                    Load site data from CSV file (bypasses API)"
+    echo "  --dns-integration <id>          Specify destination DNS integration ID (for Step 1.3)"
+    echo "  --dns-integration-skip          Skip destination DNS integration lookup in Step 1.3"
     echo "  --list-states                   List all migration state files"
     echo "  --clear-state                   Clear state file for the specified site (-s required)"
     echo "  --fix-state                     Deduplicate completed_steps in state file (-s required)"
@@ -55,6 +62,9 @@ function _usage() {
     echo
     echo "Migration Steps:"
     echo "  1     - Validate input (confirm site exists on both profiles)"
+    echo "          1.1  Validate system users"
+    echo "          1.2  Get domain routing (none/www/root)"
+    echo "          1.3  Get SSL status and DNS integration"
     echo "  2     - Server discovery and SSH validation"
     echo "          2.1  Get server IPs from API"
     echo "          2.2  Test SSH connectivity"
@@ -71,8 +81,11 @@ function _usage() {
     echo "          5.1  Check for custom nginx configs"
     echo "          5.2  Run gp commands for special configs"
     echo "          5.3  Backup and copy nginx files"
-    echo "  6     - Copy user-config.php (if exists)"
-    echo "  7     - Final steps (clear cache, print summary)"
+    echo "  6     - Copy user-configs.php (if exists)"
+    echo "  7     - Sync domain route (none/www/root)"
+    echo "  8     - Enable DNS integration on destination (Cloudflare/DNSME)"
+    echo "  9     - Enable SSL on destination (if source has SSL)"
+    echo "  10    - Final steps (cyber.html, gp fix cached, wp cache flush)"
     echo
     echo "State & Logs:"
     echo "  State files: $STATE_DIR/gp-site-mig-<site>.json"
@@ -577,9 +590,12 @@ function _step_1() {
     fi
 
     if [[ "$source_system_user_name" == "UNKNOWN" || -z "$source_system_user_name" ]]; then
-        _warning "System user cache missing for '$SOURCE_PROFILE' (cannot resolve system user name)."
+        _error "System user cache missing for '$SOURCE_PROFILE' (cannot resolve system user name)."
         _loading3 "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-users"
-        _log "STEP 1: System user cache missing for profile $SOURCE_PROFILE"
+        _log "STEP 1 FAILED: System user cache missing for profile $SOURCE_PROFILE"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
     fi
     
     _debug "Source site_id: $source_site_id"
@@ -651,9 +667,12 @@ function _step_1() {
     fi
 
     if [[ "$dest_system_user_name" == "UNKNOWN" || -z "$dest_system_user_name" ]]; then
-        _warning "System user cache missing for '$DEST_PROFILE' (cannot resolve system user name)."
+        _error "System user cache missing for '$DEST_PROFILE' (cannot resolve system user name)."
         _loading3 "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-users"
-        _log "STEP 1: System user cache missing for profile $DEST_PROFILE"
+        _log "STEP 1 FAILED: System user cache missing for profile $DEST_PROFILE"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
     fi
     
     _debug "Dest site_id: $dest_site_id"
@@ -695,6 +714,342 @@ function _step_1() {
     
     _success "Step 1 complete: Input validation passed"
     _log "STEP 1 COMPLETE: Input validation passed"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 1.1 - Get system user usernames from system-user API
+# Queries the system-user API using system_user_id from site data
+# Stores: source_system_user (username), dest_system_user (username)
+# Note: This is largely redundant now as Step 1 already resolves usernames
+#       from cache, but kept for API-based validation if needed
+# -----------------------------------------------------------------------------
+function _step_1_1() {
+    _loading "Step 1.1: Validate system users"
+    _log "STEP 1.1: Starting system user validation"
+
+    # Read system user data from state (captured in Step 1)
+    local source_system_user_id source_system_user_name
+    local dest_system_user_id dest_system_user_name
+    source_system_user_id=$(_state_read ".data.source_system_user_id")
+    source_system_user_name=$(_state_read ".data.source_system_user_name")
+    dest_system_user_id=$(_state_read ".data.dest_system_user_id")
+    dest_system_user_name=$(_state_read ".data.dest_system_user_name")
+
+    if [[ -z "$source_system_user_id" || "$source_system_user_id" == "null" ]]; then
+        _error "Source system user ID not found in state. Run Step 1 first."
+        _log "STEP 1.1 FAILED: source_system_user_id not in state"
+        return 1
+    fi
+
+    if [[ -z "$dest_system_user_id" || "$dest_system_user_id" == "null" ]]; then
+        _error "Destination system user ID not found in state. Run Step 1 first."
+        _log "STEP 1.1 FAILED: dest_system_user_id not in state"
+        return 1
+    fi
+
+    _loading2 "Source system user: $source_system_user_name (id=$source_system_user_id)"
+    _loading2 "Destination system user: $dest_system_user_name (id=$dest_system_user_id)"
+
+    # Validate that usernames were resolved
+    if [[ -z "$source_system_user_name" || "$source_system_user_name" == "UNKNOWN" || "$source_system_user_name" == "null" ]]; then
+        _error "Source system user name not resolved. Check system-user cache for $SOURCE_PROFILE"
+        _loading3 "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-users"
+        _log "STEP 1.1 FAILED: source_system_user_name not resolved"
+        return 1
+    fi
+
+    if [[ -z "$dest_system_user_name" || "$dest_system_user_name" == "UNKNOWN" || "$dest_system_user_name" == "null" ]]; then
+        _error "Destination system user name not resolved. Check system-user cache for $DEST_PROFILE"
+        _loading3 "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-users"
+        _log "STEP 1.1 FAILED: dest_system_user_name not resolved"
+        return 1
+    fi
+
+    _state_add_completed_step "1.1"
+    _success "Step 1.1 complete: System users validated"
+    _log "STEP 1.1 COMPLETE: source_user=$source_system_user_name, dest_user=$dest_system_user_name"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 1.2 - Get domain routing for source and destination
+# Gets the primary domain for source/dest sites from domains cache
+# Reads the route field (none, www, root) for both
+# Stores: source_domain_id, source_route, dest_domain_id, dest_route
+# -----------------------------------------------------------------------------
+function _step_1_2() {
+    _loading "Step 1.2: Get domain routing"
+    _log "STEP 1.2: Starting domain routing lookup"
+
+    # Read site IDs from state
+    local source_site_id dest_site_id
+    source_site_id=$(_state_read ".data.source_site_id")
+    dest_site_id=$(_state_read ".data.dest_site_id")
+
+    if [[ -z "$source_site_id" || "$source_site_id" == "null" ]]; then
+        _error "Source site ID not found in state. Run Step 1 first."
+        _log "STEP 1.2 FAILED: source_site_id not in state"
+        return 1
+    fi
+
+    if [[ -z "$dest_site_id" || "$dest_site_id" == "null" ]]; then
+        _error "Destination site ID not found in state. Run Step 1 first."
+        _log "STEP 1.2 FAILED: dest_site_id not in state"
+        return 1
+    fi
+
+    # --- Source Domain ---
+    _loading2 "Looking up source domain for site_id=$source_site_id"
+    local source_domain_cache="${CACHE_DIR}/${SOURCE_PROFILE}_domain.json"
+    
+    if [[ ! -f "$source_domain_cache" ]]; then
+        _error "Domain cache not found for source profile '$SOURCE_PROFILE'"
+        _loading3 "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-domains"
+        _log "STEP 1.2 FAILED: Source domain cache not found"
+        return 1
+    fi
+
+    # Find primary domain for source site (flatten handles nested arrays from pagination)
+    # Use jq -s to slurp results into array and select first match
+    local source_domain_data
+    source_domain_data=$(jq --arg site_id "$source_site_id" \
+        '[flatten | .[] | select(.site_id == ($site_id | tonumber) and .type == "primary")] | .[0]' \
+        "$source_domain_cache" 2>/dev/null)
+    
+    if [[ -z "$source_domain_data" || "$source_domain_data" == "null" ]]; then
+        _error "Primary domain not found for source site_id=$source_site_id"
+        _log "STEP 1.2 FAILED: Source primary domain not found"
+        return 1
+    fi
+
+    local source_domain_id source_domain_url source_route
+    source_domain_id=$(echo "$source_domain_data" | jq -r '.id')
+    source_domain_url=$(echo "$source_domain_data" | jq -r '.url')
+    source_route=$(echo "$source_domain_data" | jq -r '.route // "none"')
+
+    _loading3 "Source primary domain: $source_domain_url (id=$source_domain_id, route=$source_route)"
+    _debug "Source domain data: $source_domain_data"
+
+    # --- Destination Domain ---
+    _loading2 "Looking up destination domain for site_id=$dest_site_id"
+    local dest_domain_cache="${CACHE_DIR}/${DEST_PROFILE}_domain.json"
+    
+    if [[ ! -f "$dest_domain_cache" ]]; then
+        _error "Domain cache not found for destination profile '$DEST_PROFILE'"
+        _loading3 "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-domains"
+        _log "STEP 1.2 FAILED: Destination domain cache not found"
+        return 1
+    fi
+
+    # Find primary domain for destination site
+    local dest_domain_data
+    dest_domain_data=$(jq --arg site_id "$dest_site_id" \
+        '[flatten | .[] | select(.site_id == ($site_id | tonumber) and .type == "primary")] | .[0]' \
+        "$dest_domain_cache" 2>/dev/null)
+    
+    if [[ -z "$dest_domain_data" || "$dest_domain_data" == "null" ]]; then
+        _error "Primary domain not found for destination site_id=$dest_site_id"
+        _log "STEP 1.2 FAILED: Destination primary domain not found"
+        return 1
+    fi
+
+    local dest_domain_id dest_domain_url dest_route
+    dest_domain_id=$(echo "$dest_domain_data" | jq -r '.id')
+    dest_domain_url=$(echo "$dest_domain_data" | jq -r '.url')
+    dest_route=$(echo "$dest_domain_data" | jq -r '.route // "none"')
+
+    _loading3 "Destination primary domain: $dest_domain_url (id=$dest_domain_id, route=$dest_route)"
+    _debug "Destination domain data: $dest_domain_data"
+
+    # Compare routes
+    if [[ "$source_route" == "$dest_route" ]]; then
+        _loading3 "Routes match: $source_route"
+    else
+        _warning "Routes differ: source=$source_route, destination=$dest_route"
+        _loading3 "Step 7 will sync the route from source to destination"
+    fi
+
+    # Store to state
+    _state_write ".data.source_domain_id" "$source_domain_id"
+    _state_write ".data.source_domain_url" "$source_domain_url"
+    _state_write ".data.source_route" "$source_route"
+    _state_write ".data.dest_domain_id" "$dest_domain_id"
+    _state_write ".data.dest_domain_url" "$dest_domain_url"
+    _state_write ".data.dest_route" "$dest_route"
+
+    _state_add_completed_step "1.2"
+    _success "Step 1.2 complete: Domain routing captured"
+    _log "STEP 1.2 COMPLETE: source_route=$source_route, dest_route=$dest_route"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 1.3 - Get SSL status and DNS integration for source
+# Reads: is_ssl, ssl_status, is_wildcard from source primary domain
+# Reads: user_dns.integration_name, user_dns.provider.name, dns_management_id
+# Queries destination DNS integrations via GET /user/integration
+# Stores: source_is_ssl, source_ssl_status, source_is_wildcard, source_dns_provider,
+#         source_dns_integration_id, dest_dns_integration_id
+# -----------------------------------------------------------------------------
+function _step_1_3() {
+    _loading "Step 1.3: Get SSL and DNS integration info"
+    _log "STEP 1.3: Starting SSL and DNS integration lookup"
+
+    # Read site/domain IDs from state
+    local source_site_id source_domain_id
+    source_site_id=$(_state_read ".data.source_site_id")
+    source_domain_id=$(_state_read ".data.source_domain_id")
+
+    if [[ -z "$source_domain_id" || "$source_domain_id" == "null" ]]; then
+        _error "Source domain ID not found in state. Run Step 1.2 first."
+        _log "STEP 1.3 FAILED: source_domain_id not in state"
+        return 1
+    fi
+
+    # --- Source Domain SSL and DNS Info ---
+    _loading2 "Reading SSL and DNS info for source domain_id=$source_domain_id"
+    local source_domain_cache="${CACHE_DIR}/${SOURCE_PROFILE}_domain.json"
+    
+    local source_domain_data
+    source_domain_data=$(jq --arg domain_id "$source_domain_id" \
+        '[flatten | .[] | select(.id == ($domain_id | tonumber))] | .[0]' \
+        "$source_domain_cache" 2>/dev/null)
+    
+    if [[ -z "$source_domain_data" || "$source_domain_data" == "null" ]]; then
+        _error "Domain not found in cache for domain_id=$source_domain_id"
+        _log "STEP 1.3 FAILED: Source domain not found in cache"
+        return 1
+    fi
+
+    # Extract SSL info
+    local source_is_ssl source_ssl_status source_is_wildcard
+    source_is_ssl=$(echo "$source_domain_data" | jq -r '.is_ssl // false')
+    source_ssl_status=$(echo "$source_domain_data" | jq -r '.ssl_status // "null"')
+    source_is_wildcard=$(echo "$source_domain_data" | jq -r '.is_wildcard // false')
+
+    _loading3 "SSL: enabled=$source_is_ssl, status=$source_ssl_status, wildcard=$source_is_wildcard"
+
+    # Extract DNS integration info
+    local source_dns_management_id source_dns_integration_name source_dns_provider_name
+    source_dns_management_id=$(echo "$source_domain_data" | jq -r '.dns_management_id // "null"')
+    source_dns_integration_name=$(echo "$source_domain_data" | jq -r '.user_dns.integration_name // "none"')
+    source_dns_provider_name=$(echo "$source_domain_data" | jq -r '.user_dns.provider.name // "none"')
+
+    _loading3 "DNS: provider=$source_dns_provider_name, integration=$source_dns_integration_name (id=$source_dns_management_id)"
+    _debug "Source domain full data: $source_domain_data"
+
+    # --- Destination DNS Integrations ---
+    if [[ "$DNS_INTEGRATION_SKIP" == "1" ]]; then
+        _loading2 "Skipping destination DNS integration lookup (--dns-integration-skip)"
+        _state_write ".data.dest_dns_integration_id" "skipped"
+        _log "STEP 1.3: DNS integration lookup skipped by user"
+    elif [[ -n "$DNS_INTEGRATION_ID" ]]; then
+        # User specified DNS integration ID - use it directly without API query
+        _loading2 "Using specified DNS integration: $DNS_INTEGRATION_ID (--dns-integration)"
+        _state_write ".data.dest_dns_integration_id" "$DNS_INTEGRATION_ID"
+        _log "STEP 1.3: Using user-specified DNS integration ID: $DNS_INTEGRATION_ID"
+    else
+    _loading2 "Querying destination DNS integrations..."
+    
+    # Save current profile and switch to destination
+    local saved_token="$GPBC_TOKEN"
+    local saved_token_name="$GPBC_TOKEN_NAME"
+    
+    if ! _gp_set_profile_silent "$DEST_PROFILE"; then
+        _error "Failed to switch to destination profile: $DEST_PROFILE"
+        _log "STEP 1.3 FAILED: Could not switch to destination profile"
+        return 1
+    fi
+
+    # Query integrations API
+    local integrations_output
+    _debug "Fetching integrations with profile: $GPBC_TOKEN_NAME"
+    if ! gp_api GET "/user/integrations"; then
+        _error "Failed to fetch integrations from destination profile"
+        _error "API Error: $API_ERROR"
+        _debug "API Output: $API_OUTPUT"
+        _log "STEP 1.3 FAILED: Could not fetch destination integrations - $API_ERROR"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
+    fi
+    integrations_output="$API_OUTPUT"
+    _debug "Integrations response: $integrations_output"
+
+    # Restore original profile
+    GPBC_TOKEN="$saved_token"
+    GPBC_TOKEN_NAME="$saved_token_name"
+
+    # Filter for DNS integrations (cloudflare, dnsme, etc.)
+    local dns_integrations dns_integration_count
+    dns_integrations=$(echo "$integrations_output" | jq '[.integrations[] | select(.integrated_service == "cloudflare" or .integrated_service == "dnsme")]')
+    dns_integration_count=$(echo "$dns_integrations" | jq 'length')
+
+    _debug "Found $dns_integration_count DNS integrations on destination"
+    _debug "DNS integrations: $dns_integrations"
+
+    local dest_dns_integration_id=""
+
+    if [[ "$dns_integration_count" -eq 0 ]]; then
+        _loading3 "No DNS integrations found on destination profile"
+        _log "STEP 1.3: No DNS integrations on destination"
+        dest_dns_integration_id="none"
+    elif [[ "$dns_integration_count" -eq 1 ]]; then
+        # Single integration - use it automatically
+        dest_dns_integration_id=$(echo "$dns_integrations" | jq -r '.[0].id')
+        local dest_dns_integration_name dest_dns_service
+        dest_dns_integration_name=$(echo "$dns_integrations" | jq -r '.[0].integration_name')
+        dest_dns_service=$(echo "$dns_integrations" | jq -r '.[0].integrated_service')
+        _loading3 "Using destination DNS integration: $dest_dns_integration_name ($dest_dns_service, id=$dest_dns_integration_id)"
+        _log "STEP 1.3: Auto-selected destination DNS integration: $dest_dns_integration_name (id=$dest_dns_integration_id)"
+    else
+        # Multiple integrations - check if --dns-integration was provided
+        if [[ -n "$DNS_INTEGRATION_ID" ]]; then
+            # Verify the provided ID exists
+            local valid_id
+            valid_id=$(echo "$dns_integrations" | jq --arg id "$DNS_INTEGRATION_ID" '[.[] | select(.id == ($id | tonumber))] | length')
+            if [[ "$valid_id" -eq 1 ]]; then
+                dest_dns_integration_id="$DNS_INTEGRATION_ID"
+                local dest_dns_integration_name
+                dest_dns_integration_name=$(echo "$dns_integrations" | jq -r --arg id "$DNS_INTEGRATION_ID" '.[] | select(.id == ($id | tonumber)) | .integration_name')
+                _loading3 "Using specified DNS integration: $dest_dns_integration_name (id=$dest_dns_integration_id)"
+                _log "STEP 1.3: Using specified destination DNS integration: $dest_dns_integration_name (id=$dest_dns_integration_id)"
+            else
+                _error "Specified DNS integration ID '$DNS_INTEGRATION_ID' not found on destination"
+                _log "STEP 1.3 FAILED: Invalid DNS integration ID specified"
+                return 1
+            fi
+        else
+            # Multiple integrations and no --dns-integration flag
+            _error "Multiple DNS integrations found on destination profile. Please specify one with --dns-integration <id>"
+            echo
+            echo "Available DNS integrations on $DEST_PROFILE:"
+            echo "$dns_integrations" | jq -r '.[] | "  ID: \(.id) - \(.integration_name) (\(.integrated_service))"'
+            echo
+            _log "STEP 1.3 FAILED: Multiple DNS integrations, none specified"
+            return 1
+        fi
+    fi
+
+    # Store dest_dns_integration_id to state
+    _state_write ".data.dest_dns_integration_id" "$dest_dns_integration_id"
+    fi  # End of DNS_INTEGRATION_SKIP check
+
+    # Store to state
+    _state_write ".data.source_is_ssl" "$source_is_ssl"
+    _state_write ".data.source_ssl_status" "$source_ssl_status"
+    _state_write ".data.source_is_wildcard" "$source_is_wildcard"
+    _state_write ".data.source_dns_management_id" "$source_dns_management_id"
+    _state_write ".data.source_dns_integration_name" "$source_dns_integration_name"
+    _state_write ".data.source_dns_provider" "$source_dns_provider_name"
+
+    _state_add_completed_step "1.3"
+    _success "Step 1.3 complete: SSL and DNS integration info captured"
+    _log "STEP 1.3 COMPLETE: ssl=$source_is_ssl, dns_provider=$source_dns_provider_name, dest_dns_id=$dest_dns_integration_id"
     echo
     return 0
 }
@@ -1692,16 +2047,9 @@ function _step_3_4() {
     # --delete: delete extraneous files from destination
     # --exclude: common exclusions for WordPress
     local rsync_excludes=(
-        "--exclude=.git"
-        "--exclude=.gitignore"
         "--exclude=.DS_Store"
         "--exclude=wp-config.php"
         "--exclude=.htaccess"
-        "--exclude=cache/"
-        "--exclude=wp-content/cache/"
-        "--exclude=wp-content/w3tc-config/"
-        "--exclude=wp-content/uploads/cache/"
-        "--exclude=wp-content/debug.log"
     )
 
     local rsync_opts="-avz --progress --delete ${rsync_excludes[*]}"
@@ -1980,9 +2328,15 @@ function _step_4() {
         _warning "  Existing marker: $existing_marker"
         _log "Existing migration marker found: $existing_marker"
         
-        if [[ "$FORCE_DB" != "1" ]]; then
+        if [[ "$SKIP_DB" == "1" ]]; then
+            _warning "Skipping database migration (--skip-db is set)"
+            _log "STEP 4 SKIPPED: Existing marker found, --skip-db set"
+            _mark_step_complete 4
+            return 0
+        elif [[ "$FORCE_DB" != "1" ]]; then
             _error "Database migration aborted to prevent overwriting existing migration."
             _error "Use --force-db to override this check and migrate anyway."
+            _error "Use --skip-db to skip database migration and continue."
             _log "STEP 4 ABORTED: Existing marker found, --force-db not set"
             return 1
         else
@@ -2414,6 +2768,38 @@ function _step_5_2() {
         fi
     done
 
+    # Always disable XML-RPC on destination (security measure) unless already set
+    local xmlrpc_config="disable-xmlrpc-main-context.conf"
+    local check_dest_cmd="test -f '${dest_nginx_dir}/${xmlrpc_config}' && echo 'exists' || echo 'missing'"
+    local dest_xmlrpc_check
+    dest_xmlrpc_check=$(_ssh_capture "$dest_server_ip" "$check_dest_cmd" 2>/dev/null)
+
+    if [[ "$dest_xmlrpc_check" == "exists" ]]; then
+        _loading3 "  Skipping: XML-RPC already disabled on destination"
+        _log "STEP 5.2: XML-RPC already disabled on destination"
+        ((skip_count++))
+    elif [[ "$DRY_RUN" == "1" ]]; then
+        _dry_run_msg "Would execute on destination: gp site $SITE -disable-xmlrpc"
+        ((success_count++))
+    else
+        _loading2 "Disabling XML-RPC on destination"
+        local gp_cmd="gp site $SITE -disable-xmlrpc"
+        local cmd_output cmd_rc
+        cmd_output=$(_ssh_capture "$dest_server_ip" "$gp_cmd" 2>&1)
+        cmd_rc=$?
+
+        if [[ $cmd_rc -ne 0 ]]; then
+            _error_log "Step 5.2: Failed to disable XML-RPC on destination (exit code: $cmd_rc)"
+            [[ -n "$cmd_output" ]] && _error_log "  Output: $cmd_output"
+            ((error_count++))
+        else
+            _success "  Command succeeded: $gp_cmd"
+            _log "STEP 5.2: Successfully disabled XML-RPC on destination"
+            [[ -n "$cmd_output" ]] && _verbose "  Output: $cmd_output"
+            ((success_count++))
+        fi
+    fi
+
     local summary_parts=()
     [[ $success_count -gt 0 ]] && summary_parts+=("$success_count executed")
     [[ $skip_count -gt 0 ]] && summary_parts+=("$skip_count skipped")
@@ -2568,13 +2954,13 @@ function _step_5() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 6 - Copy user-config.php
-# Checks for user-config.php on source, backs up existing on destination,
+# Step 6 - Copy user-configs.php
+# Checks for user-configs.php on source, backs up existing on destination,
 # then copies from source to destination
 # -----------------------------------------------------------------------------
 function _step_6() {
-    _loading "Step 6: Copy user-config.php"
-    _log "STEP 6: Starting user-config.php migration"
+    _loading "Step 6: Copy user-configs.php"
+    _log "STEP 6: Starting user-configs.php migration"
 
     local source_server_ip dest_server_ip source_site_path dest_site_path
     source_server_ip=$(_state_read ".data.source_server_ip")
@@ -2588,30 +2974,30 @@ function _step_6() {
         return 1
     fi
 
-    local source_user_config="${source_site_path}/user-config.php"
-    local dest_user_config="${dest_site_path}/user-config.php"
+    local source_user_config="${source_site_path}/user-configs.php"
+    local dest_user_config="${dest_site_path}/user-configs.php"
 
-    # Check if user-config.php exists on source
-    _loading2 "Checking for user-config.php on source..."
+    # Check if user-configs.php exists on source
+    _loading2 "Checking for user-configs.php on source..."
     local check_cmd="test -f '$source_user_config' && echo 'exists' || echo 'missing'"
     local source_check
     source_check=$(_ssh_capture "$source_server_ip" "$check_cmd")
     source_check=$(echo "$source_check" | tr -d '[:space:]')
 
     if [[ "$source_check" != "exists" ]]; then
-        _loading3 "No user-config.php found on source server"
-        _log "STEP 6: No user-config.php on source, skipping"
+        _loading3 "No user-configs.php found on source server"
+        _log "STEP 6: No user-configs.php on source, skipping"
         _state_add_completed_step "6"
-        _success "Step 6 complete: No user-config.php to copy"
+        _success "Step 6 complete: No user-configs.php to copy"
         echo
         return 0
     fi
 
-    _loading2 "Found user-config.php on source"
+    _loading2 "Found user-configs.php on source"
 
     if [[ "$DRY_RUN" == "1" ]]; then
-        _dry_run_msg "Would backup destination user-config.php (if exists)"
-        _dry_run_msg "Would copy user-config.php from source to destination"
+        _dry_run_msg "Would backup destination user-configs.php (if exists)"
+        _dry_run_msg "Would copy user-configs.php from source to destination"
         _state_add_completed_step "6"
         _success "Step 6 complete (dry-run)"
         echo
@@ -2625,30 +3011,30 @@ function _step_6() {
     local known_hosts_file="${STATE_DIR}/gp-site-mig-${SITE}-known_hosts"
     local ssh_opts=(-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts_file")
 
-    # Check if user-config.php exists on destination (for backup)
-    _loading2 "Checking for existing user-config.php on destination..."
+    # Check if user-configs.php exists on destination (for backup)
+    _loading2 "Checking for existing user-configs.php on destination..."
     local dest_check
     dest_check=$(_ssh_capture "$dest_server_ip" "test -f '$dest_user_config' && echo 'exists' || echo 'missing'")
     dest_check=$(echo "$dest_check" | tr -d '[:space:]')
 
     if [[ "$dest_check" == "exists" ]]; then
         # Show diff between source and destination
-        _loading2 "Comparing source and destination user-config.php..."
+        _loading2 "Comparing source and destination user-configs.php..."
         local source_content dest_content
         source_content=$(ssh "${ssh_opts[@]}" "$ssh_user@$source_server_ip" "cat '$source_user_config'" 2>/dev/null)
         dest_content=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "cat '$dest_user_config'" 2>/dev/null)
 
         if [[ "$source_content" == "$dest_content" ]]; then
             _loading3 "Files are identical, no changes needed"
-            _log "STEP 6: user-config.php files are identical, skipping"
+            _log "STEP 6: user-configs.php files are identical, skipping"
             _state_add_completed_step "6"
-            _success "Step 6 complete: user-config.php already in sync"
+            _success "Step 6 complete: user-configs.php already in sync"
             echo
             return 0
         fi
 
         echo
-        echo "--- Differences between source and destination user-config.php ---"
+        echo "--- Differences between source and destination user-configs.php ---"
         diff --color=auto <(echo "$dest_content") <(echo "$source_content") || true
         echo "--- End of diff (destination <- source) ---"
         echo
@@ -2656,41 +3042,607 @@ function _step_6() {
         # Backup existing file
         local backup_file="${dest_site_path}/user-config-src-backup.php"
 
-        _loading2 "Backing up existing user-config.php to: user-config-src-backup.php"
+        _loading2 "Backing up existing user-configs.php to: user-config-src-backup.php"
         local backup_cmd="cp '$dest_user_config' '$backup_file'"
         local backup_output backup_rc
         backup_output=$(_ssh_capture "$dest_server_ip" "$backup_cmd" 2>&1)
         backup_rc=$?
 
         if [[ $backup_rc -ne 0 ]]; then
-            _error "Failed to backup existing user-config.php (exit code: $backup_rc)"
+            _error "Failed to backup existing user-configs.php (exit code: $backup_rc)"
             [[ -n "$backup_output" ]] && _error "Output: $backup_output"
             _log "STEP 6 WARNING: backup failed, continuing with copy"
-            _error_log "Step 6: Failed to backup user-config.php - $backup_output"
+            _error_log "Step 6: Failed to backup user-configs.php - $backup_output"
         else
             _verbose "Backup created: $backup_file"
+            # Set ownership to destination system user
+            local dest_system_user_name
+            dest_system_user_name=$(_state_read ".data.dest_system_user_name")
+            if [[ -n "$dest_system_user_name" && "$dest_system_user_name" != "UNKNOWN" && "$dest_system_user_name" != "null" ]]; then
+                _loading2 "Setting backup ownership to $dest_system_user_name..."
+                _ssh_capture "$dest_server_ip" "chown '$dest_system_user_name:$dest_system_user_name' '$backup_file'" 2>/dev/null || true
+                _verbose "Backup ownership set to $dest_system_user_name"
+            else
+                _verbose "Skipping chown (dest_system_user_name not set)"
+            fi
         fi
     else
-        _verbose "No existing user-config.php on destination, skipping backup"
+        _verbose "No existing user-configs.php on destination, skipping backup"
     fi
 
-    # Copy user-config.php from source to destination
-    _loading2 "Copying user-config.php from source to destination..."
+    # Copy user-configs.php from source to destination
+    _loading2 "Copying user-configs.php from source to destination..."
     local transfer_output transfer_rc
     transfer_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$source_server_ip" "cat '$source_user_config'" 2>&1 | \
         ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "cat > '$dest_user_config'" 2>&1)
     transfer_rc=$?
 
     if [[ $transfer_rc -ne 0 ]]; then
-        _error "Failed to copy user-config.php (exit code: $transfer_rc)"
+        _error "Failed to copy user-configs.php (exit code: $transfer_rc)"
         [[ -n "$transfer_output" ]] && _error "Output: $transfer_output"
         _log "STEP 6 FAILED: copy failed"
         return 1
     fi
 
     _state_add_completed_step "6"
-    _success "Step 6 complete: user-config.php copied successfully"
-    _log "STEP 6 COMPLETE: user-config.php migrated"
+    _success "Step 6 complete: user-configs.php copied successfully"
+    _log "STEP 6 COMPLETE: user-configs.php migrated"
+    echo
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Step 7 - Sync Domain Route
+# Compares source and destination domain routes, updates destination if different
+# Route values: none, www, root
+# -----------------------------------------------------------------------------
+function _step_7() {
+    _loading "Step 7: Sync Domain Route"
+    _log "STEP 7: Starting domain route sync"
+
+    # Read route data from state (captured in Step 1.2)
+    local source_route dest_route source_domain_id dest_domain_id
+    source_route=$(_state_read ".data.source_route")
+    dest_route=$(_state_read ".data.dest_route")
+    source_domain_id=$(_state_read ".data.source_domain_id")
+    dest_domain_id=$(_state_read ".data.dest_domain_id")
+
+    # Check if route data exists in state
+    if [[ -z "$source_route" || "$source_route" == "null" ]]; then
+        _warning "Source route not found in state. Run Step 1.2 first or route data not captured."
+        _log "STEP 7 WARNING: source_route not in state"
+        _state_add_completed_step "7"
+        _success "Step 7 complete: Skipped (no route data)"
+        echo
+        return 0
+    fi
+
+    if [[ -z "$dest_route" || "$dest_route" == "null" ]]; then
+        _warning "Destination route not found in state. Run Step 1.2 first or route data not captured."
+        _log "STEP 7 WARNING: dest_route not in state"
+        _state_add_completed_step "7"
+        _success "Step 7 complete: Skipped (no route data)"
+        echo
+        return 0
+    fi
+
+    if [[ -z "$dest_domain_id" || "$dest_domain_id" == "null" ]]; then
+        _warning "Destination domain ID not found in state. Run Step 1.2 first."
+        _log "STEP 7 WARNING: dest_domain_id not in state"
+        _state_add_completed_step "7"
+        _success "Step 7 complete: Skipped (no domain ID)"
+        echo
+        return 0
+    fi
+
+    _loading2 "Source route: $source_route"
+    _loading2 "Destination route: $dest_route"
+
+    # Compare routes
+    if [[ "$source_route" == "$dest_route" ]]; then
+        _loading3 "Routes already match ($source_route)"
+        _log "STEP 7: Routes already match ($source_route), skipping update"
+        _state_write ".data.route_updated" "false"
+        _state_add_completed_step "7"
+        _success "Step 7 complete: Routes already in sync"
+        echo
+        return 0
+    fi
+
+    _loading2 "Routes differ, updating destination route from '$dest_route' to '$source_route'"
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        _dry_run_msg "Would update destination domain route via PUT /domain/$dest_domain_id with {\"routing\": \"$source_route\"}"
+        _state_add_completed_step "7"
+        _success "Step 7 complete (dry-run)"
+        echo
+        return 0
+    fi
+
+    # Switch to destination profile for API call
+    local saved_token="$GPBC_TOKEN"
+    local saved_token_name="$GPBC_TOKEN_NAME"
+    
+    if ! _gp_set_profile_silent "$DEST_PROFILE"; then
+        _error "Failed to switch to destination profile: $DEST_PROFILE"
+        _log "STEP 7 FAILED: Could not switch to destination profile"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
+    fi
+
+    # Make PUT request to update domain route
+    local endpoint="/domain/${dest_domain_id}"
+    local payload="{\"routing\": \"$source_route\"}"
+    
+    _loading2 "Sending PUT request to update domain route..."
+    _debug "Endpoint: $endpoint"
+    _debug "Payload: $payload"
+
+    local curl_output curl_http_code curl_exit_code api_output
+    curl_output=$(mktemp)
+    curl_http_code="$(curl -s \
+        --output "$curl_output" \
+        -w "%{http_code}\n" \
+        --request PUT \
+        --url "${GP_API_URL}${endpoint}" \
+        -H "Authorization: Bearer $GPBC_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$payload")"
+    curl_exit_code="$?"
+    curl_http_code=${curl_http_code%%$'\n'*}
+    api_output=$(<"$curl_output")
+    rm -f "$curl_output"
+
+    _debug "HTTP Code: $curl_http_code, Exit Code: $curl_exit_code"
+    _debug "API Output: $api_output"
+
+    # Restore original profile
+    GPBC_TOKEN="$saved_token"
+    GPBC_TOKEN_NAME="$saved_token_name"
+
+    # Check for success (HTTP 200 for update)
+    if [[ $curl_http_code -eq 200 ]]; then
+        _verbose "API Response: $api_output"
+        _state_write ".data.route_updated" "true"
+        _state_add_completed_step "7"
+        _success "Step 7 complete: Domain route updated from '$dest_route' to '$source_route'"
+        _log "STEP 7 COMPLETE: Domain route updated from '$dest_route' to '$source_route'"
+        echo
+        return 0
+    else
+        _error "Failed to update domain route. HTTP Code: $curl_http_code"
+        if [[ -n "$api_output" ]]; then
+            local error_msg
+            error_msg=$(echo "$api_output" | jq -r '.message // .error // empty' 2>/dev/null)
+            [[ -n "$error_msg" ]] && _error "API Error: $error_msg"
+            _verbose "Full response: $api_output"
+        fi
+        _log "STEP 7 FAILED: API returned HTTP $curl_http_code - $api_output"
+        return 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Step 8 - Cloudflare DNS Integration
+# Enables DNS integration on destination domain if configured
+# Uses dest_dns_integration_id from state (captured in Step 1.3)
+# -----------------------------------------------------------------------------
+function _step_8() {
+    _loading "Step 8: Enable DNS Integration on Destination"
+    _log "STEP 8: Starting DNS integration setup"
+
+    # Check if DNS integration skip flag is set (for resumed migrations)
+    if [[ "$DNS_INTEGRATION_SKIP" == "1" ]]; then
+        _loading2 "DNS integration skipped via --dns-integration-skip flag"
+        _log "STEP 8: DNS integration skipped by user flag (resume)"
+        _state_write ".data.dns_integration_enabled" "skipped"
+        _state_add_completed_step "8"
+        _success "Step 8 complete: DNS integration skipped"
+        echo
+        return 0
+    fi
+
+    # Read DNS integration data from state
+    local dest_dns_integration_id dest_domain_id source_dns_provider
+    dest_dns_integration_id=$(_state_read ".data.dest_dns_integration_id")
+    dest_domain_id=$(_state_read ".data.dest_domain_id")
+    source_dns_provider=$(_state_read ".data.source_dns_provider")
+
+    # Check if DNS integration was skipped (state value from Step 1.3)
+    if [[ "$dest_dns_integration_id" == "skipped" ]]; then
+        _loading2 "DNS integration was skipped via --dns-integration-skip flag"
+        _log "STEP 8: DNS integration skipped by user flag"
+        _state_write ".data.dns_integration_enabled" "skipped"
+        _state_add_completed_step "8"
+        _success "Step 8 complete: DNS integration skipped"
+        echo
+        return 0
+    fi
+
+    # Check if DNS integration exists
+    if [[ -z "$dest_dns_integration_id" || "$dest_dns_integration_id" == "null" || "$dest_dns_integration_id" == "none" ]]; then
+        _loading2 "No DNS integration configured for destination"
+        _log "STEP 8: No DNS integration configured, skipping"
+        _state_write ".data.dns_integration_enabled" "false"
+        _state_add_completed_step "8"
+        _success "Step 8 complete: No DNS integration to enable"
+        echo
+        return 0
+    fi
+
+    if [[ -z "$dest_domain_id" || "$dest_domain_id" == "null" ]]; then
+        _error "Destination domain ID not found in state. Run Step 1.2 first."
+        _log "STEP 8 FAILED: dest_domain_id not in state"
+        return 1
+    fi
+
+    # Determine dns_management type based on source provider (default to cloudflare_full)
+    local dns_management_type="cloudflare_full"
+    if [[ "$source_dns_provider" == "dnsme" ]]; then
+        dns_management_type="dnsme_full"
+    elif [[ "$source_dns_provider" == "cloudflare" ]]; then
+        dns_management_type="cloudflare_full"
+    fi
+
+    _loading2 "Enabling DNS integration on destination domain_id=$dest_domain_id"
+    _loading3 "DNS Management Type: $dns_management_type"
+    _loading3 "DNS Integration ID: $dest_dns_integration_id"
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        _dry_run_msg "Would enable DNS integration via PUT /domain/$dest_domain_id with {\"dns_management\": \"$dns_management_type\", \"dns_integration_id\": $dest_dns_integration_id}"
+        _state_add_completed_step "8"
+        _success "Step 8 complete (dry-run)"
+        echo
+        return 0
+    fi
+
+    # Switch to destination profile for API call
+    local saved_token="$GPBC_TOKEN"
+    local saved_token_name="$GPBC_TOKEN_NAME"
+    
+    if ! _gp_set_profile_silent "$DEST_PROFILE"; then
+        _error "Failed to switch to destination profile: $DEST_PROFILE"
+        _log "STEP 8 FAILED: Could not switch to destination profile"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
+    fi
+
+    # Make PUT request to enable DNS integration with rate limit retry
+    local endpoint="/domain/${dest_domain_id}"
+    local payload="{\"dns_management\": \"$dns_management_type\", \"dns_integration_id\": $dest_dns_integration_id}"
+    
+    _loading2 "Sending PUT request to enable DNS integration..."
+    _debug "Endpoint: $endpoint"
+    _debug "Payload: $payload"
+
+    local curl_output curl_http_code curl_exit_code api_output
+    local retry_count=0
+    local max_retries=3
+    local rate_limit_delay=15
+    
+    while [[ $retry_count -lt $max_retries ]]; do
+        curl_output=$(mktemp)
+        curl_http_code="$(curl -s \
+            --output "$curl_output" \
+            -w "%{http_code}\n" \
+            --request PUT \
+            --url "${GP_API_URL}${endpoint}" \
+            -H "Authorization: Bearer $GPBC_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$payload")"
+        curl_exit_code="$?"
+        curl_http_code=${curl_http_code%%$'\n'*}
+        api_output=$(<"$curl_output")
+        rm -f "$curl_output"
+
+        _debug "HTTP Code: $curl_http_code, Exit Code: $curl_exit_code"
+        _debug "API Output: $api_output"
+        
+        # Handle rate limiting (429)
+        if [[ $curl_http_code -eq 429 ]]; then
+            ((retry_count++))
+            if [[ $retry_count -lt $max_retries ]]; then
+                local current_delay=$((rate_limit_delay * retry_count))
+                _warning "Rate limited (429). Retry ${retry_count}/${max_retries} after ${current_delay}s..."
+                _log "STEP 8: Rate limited (429) - Retry ${retry_count}/${max_retries}"
+                sleep "$current_delay"
+                continue
+            else
+                _error "Rate limited (429) after ${max_retries} retries."
+                _log "STEP 8 FAILED: Rate limited (429) after ${max_retries} retries"
+                GPBC_TOKEN="$saved_token"
+                GPBC_TOKEN_NAME="$saved_token_name"
+                return 1
+            fi
+        fi
+        
+        # Break out of retry loop on non-429 response
+        break
+    done
+
+    # Restore original profile
+    GPBC_TOKEN="$saved_token"
+    GPBC_TOKEN_NAME="$saved_token_name"
+
+    # Check for success (HTTP 200 for update)
+    if [[ $curl_http_code -eq 200 ]]; then
+        _verbose "API Response: $api_output"
+        _state_write ".data.dns_integration_enabled" "true"
+        _state_add_completed_step "8"
+        _success "Step 8 complete: DNS integration enabled ($dns_management_type)"
+        _log "STEP 8 COMPLETE: DNS integration enabled, type=$dns_management_type, integration_id=$dest_dns_integration_id"
+        
+        # Pause to allow DNS integration to propagate before SSL
+        if [[ "$DRY_RUN" != "1" ]]; then
+            _loading2 "Waiting 30 seconds for DNS integration to propagate..."
+            sleep 30
+        fi
+        echo
+        return 0
+    else
+        _error "Failed to enable DNS integration. HTTP Code: $curl_http_code"
+        if [[ -n "$api_output" ]]; then
+            local error_msg error_details
+            error_msg=$(echo "$api_output" | jq -r '.message // .error // empty' 2>/dev/null)
+            # Extract detailed errors from the errors object (flatten all error arrays)
+            error_details=$(echo "$api_output" | jq -r '.errors // {} | to_entries | map(.value | if type == "array" then .[] else . end) | .[]' 2>/dev/null)
+            [[ -n "$error_msg" ]] && _error "API Error: $error_msg"
+            if [[ -n "$error_details" ]]; then
+                while IFS= read -r detail; do
+                    _error "  → $detail"
+                done <<< "$error_details"
+            fi
+            _verbose "Full response: $api_output"
+        fi
+        _log "STEP 8 FAILED: API returned HTTP $curl_http_code - $api_output"
+        return 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Step 9 - Enable SSL on Destination
+# Enables SSL on destination domain via PUT /domain/{id} if source has SSL
+# -----------------------------------------------------------------------------
+function _step_9() {
+    _loading "Step 9: Enable SSL on destination"
+    _log "STEP 9: Starting SSL enable"
+
+    # Read SSL and domain data from state
+    local source_is_ssl dest_domain_id
+    source_is_ssl=$(_state_read ".data.source_is_ssl")
+    dest_domain_id=$(_state_read ".data.dest_domain_id")
+
+    # Check if source has SSL
+    if [[ "$source_is_ssl" != "true" ]]; then
+        _loading2 "Source does not have SSL enabled, skipping"
+        _log "STEP 9: Source SSL not enabled, skipping"
+        _state_write ".data.ssl_enabled" "false"
+        _state_add_completed_step "9"
+        _success "Step 9 complete: SSL not required (source has no SSL)"
+        echo
+        return 0
+    fi
+
+    # Check if DNS integration was skipped - prompt user to change DNS manually
+    local dns_integration_enabled
+    dns_integration_enabled=$(_state_read ".data.dns_integration_enabled")
+    if [[ "$dns_integration_enabled" == "skipped" ]]; then
+        local dest_server_ip dest_domain_url
+        dest_server_ip=$(_state_read ".data.dest_server_ip")
+        dest_domain_url=$(_state_read ".data.dest_domain_url")
+        
+        echo
+        _warning "DNS integration was skipped. Manual DNS update required before SSL provisioning."
+        echo
+        _loading2 "Please update DNS for: $dest_domain_url"
+        _loading2 "Point A record to: $dest_server_ip"
+        echo
+        _loading3 "SSL provisioning requires DNS to be pointing to the destination server."
+        _loading3 "Please update your DNS records now, then wait for propagation."
+        echo
+        read -p "Have you updated DNS and confirmed propagation? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            _error "DNS update required before SSL can be enabled. Please update DNS and re-run."
+            _log "STEP 9: Aborted - user declined DNS confirmation"
+            return 1
+        fi
+        _log "STEP 9: User confirmed DNS has been updated manually"
+    fi
+
+    if [[ -z "$dest_domain_id" || "$dest_domain_id" == "null" ]]; then
+        _error "Destination domain ID not found in state. Run Step 1.2 first."
+        _log "STEP 9 FAILED: dest_domain_id not in state"
+        return 1
+    fi
+
+    _loading2 "Source has SSL enabled, enabling SSL on destination domain_id=$dest_domain_id"
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        _dry_run_msg "Would enable SSL on destination via PUT /domain/$dest_domain_id with {\"ssl\": true}"
+        _state_add_completed_step "9"
+        _success "Step 9 complete (dry-run)"
+        echo
+        return 0
+    fi
+
+    # Switch to destination profile for API call
+    local saved_token="$GPBC_TOKEN"
+    local saved_token_name="$GPBC_TOKEN_NAME"
+    
+    if ! _gp_set_profile_silent "$DEST_PROFILE"; then
+        _error "Failed to switch to destination profile: $DEST_PROFILE"
+        _log "STEP 9 FAILED: Could not switch to destination profile"
+        GPBC_TOKEN="$saved_token"
+        GPBC_TOKEN_NAME="$saved_token_name"
+        return 1
+    fi
+
+    # Make PUT request to enable SSL with rate limit retry
+    local endpoint="/domain/${dest_domain_id}"
+    local payload='{"ssl": true}'
+    
+    _loading2 "Sending PUT request to enable SSL..."
+    _debug "Endpoint: $endpoint"
+    _debug "Payload: $payload"
+
+    local curl_output curl_http_code curl_exit_code api_output
+    local retry_count=0
+    local max_retries=3
+    local rate_limit_delay=15
+    
+    while [[ $retry_count -lt $max_retries ]]; do
+        curl_output=$(mktemp)
+        curl_http_code="$(curl -s \
+            --output "$curl_output" \
+            -w "%{http_code}\n" \
+            --request PUT \
+            --url "${GP_API_URL}${endpoint}" \
+            -H "Authorization: Bearer $GPBC_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$payload")"
+        curl_exit_code="$?"
+        curl_http_code=${curl_http_code%%$'\n'*}
+        api_output=$(<"$curl_output")
+        rm -f "$curl_output"
+
+        _debug "HTTP Code: $curl_http_code, Exit Code: $curl_exit_code"
+        _debug "API Output: $api_output"
+        
+        # Handle rate limiting (429)
+        if [[ $curl_http_code -eq 429 ]]; then
+            ((retry_count++))
+            if [[ $retry_count -lt $max_retries ]]; then
+                local current_delay=$((rate_limit_delay * retry_count))
+                _warning "Rate limited (429). Retry ${retry_count}/${max_retries} after ${current_delay}s..."
+                _log "STEP 9: Rate limited (429) - Retry ${retry_count}/${max_retries}"
+                sleep "$current_delay"
+                continue
+            else
+                _error "Rate limited (429) after ${max_retries} retries."
+                _log "STEP 9 FAILED: Rate limited (429) after ${max_retries} retries"
+                GPBC_TOKEN="$saved_token"
+                GPBC_TOKEN_NAME="$saved_token_name"
+                return 1
+            fi
+        fi
+        
+        # Break out of retry loop on non-429 response
+        break
+    done
+
+    # Restore original profile
+    GPBC_TOKEN="$saved_token"
+    GPBC_TOKEN_NAME="$saved_token_name"
+
+    # Check for success (HTTP 200 for update)
+    if [[ $curl_http_code -eq 200 ]]; then
+        _verbose "API Response: $api_output"
+        _state_write ".data.ssl_enabled" "true"
+        _state_add_completed_step "9"
+        _success "Step 9 complete: SSL enable request sent"
+        _loading3 "Note: SSL provisioning may take a few minutes to complete"
+        _log "STEP 9 COMPLETE: SSL enabled on destination domain_id=$dest_domain_id"
+        echo
+        return 0
+    else
+        _error "Failed to enable SSL. HTTP Code: $curl_http_code"
+        if [[ -n "$api_output" ]]; then
+            local error_msg
+            error_msg=$(echo "$api_output" | jq -r '.message // .error // empty' 2>/dev/null)
+            [[ -n "$error_msg" ]] && _error "API Error: $error_msg"
+            _verbose "Full response: $api_output"
+        fi
+        _log "STEP 9 FAILED: API returned HTTP $curl_http_code - $api_output"
+        return 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Step 10 - Final Steps
+# Creates cyber.html for DNS verification, runs gp fix cached and wp cache flush on destination
+# -----------------------------------------------------------------------------
+function _step_10() {
+    _loading "Step 10: Final steps"
+    _log "STEP 10: Starting final steps"
+
+    # Get variables from state
+    local dest_server_ip dest_site_path dest_htdocs_path site_url
+    dest_server_ip=$(_state_read ".data.dest_server_ip")
+    dest_site_path=$(_state_read ".data.dest_site_path")
+    dest_htdocs_path=$(_state_read ".data.dest_htdocs_path")
+    site_url=$(_state_read ".site")
+
+    # Use htdocs path if available, otherwise construct it
+    if [[ -z "$dest_htdocs_path" || "$dest_htdocs_path" == "null" ]]; then
+        dest_htdocs_path="${dest_site_path}/htdocs"
+    fi
+
+    if [[ -z "$dest_server_ip" || "$dest_server_ip" == "null" ]]; then
+        _error "Destination server IP not found in state"
+        _log "STEP 10 FAILED: dest_server_ip not in state"
+        return 1
+    fi
+
+    local ssh_user="root"
+    local ssh_opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+    ssh_opts+=(-o "UserKnownHostsFile=${STATE_DIR}/gp-site-mig-${SITE}-known_hosts")
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        _dry_run_msg "Would create cyber.html with content 'vm7' in $dest_htdocs_path"
+        _dry_run_msg "Would run: gp fix cached $site_url"
+        _dry_run_msg "Would run: wp cache flush"
+        _state_add_completed_step "10"
+        _success "Step 10 complete (dry-run)"
+        return 0
+    fi
+
+    # Step 10.1: Create cyber.html file for DNS propagation verification
+    _loading2 "Creating cyber.html in destination htdocs..."
+    local cyber_output cyber_rc
+    cyber_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "echo 'vm7' > '$dest_htdocs_path/cyber.html' 2>&1")
+    cyber_rc=$?
+    if [[ $cyber_rc -eq 0 ]]; then
+        _verbose "cyber.html created successfully"
+        _loading3 "Created: $dest_htdocs_path/cyber.html (content: vm7)"
+        _loading3 "Use to verify DNS: curl -s http://$site_url/cyber.html"
+    else
+        _warning "Failed to create cyber.html: $cyber_output"
+        _log "STEP 10 WARNING: cyber.html creation failed - $cyber_output"
+    fi
+
+    # Step 10.2: Run gp fix cached
+    _loading2 "Running gp fix cached $site_url on destination..."
+    local gp_fix_output gp_fix_rc
+    gp_fix_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "gp fix cached '$site_url' 2>&1")
+    gp_fix_rc=$?
+    if [[ $gp_fix_rc -eq 0 ]]; then
+        _verbose "gp fix cached completed successfully"
+        _verbose "Output: $gp_fix_output"
+    else
+        _warning "gp fix cached returned: $gp_fix_rc"
+        _verbose "Output: $gp_fix_output"
+        _log "STEP 10 WARNING: gp fix cached failed - $gp_fix_output"
+    fi
+
+    # Step 10.3: Clear WordPress object cache using wp-cli
+    _loading2 "Clearing WordPress object cache on destination..."
+    local wp_cache_output wp_cache_rc
+    wp_cache_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "cd '$dest_htdocs_path' && wp cache flush --allow-root 2>&1" 2>&1)
+    wp_cache_rc=$?
+    if [[ $wp_cache_rc -eq 0 ]]; then
+        _verbose "WordPress cache flushed successfully"
+    else
+        _warning "WordPress cache flush returned: $wp_cache_rc"
+        _verbose "Output: $wp_cache_output"
+        _log "STEP 10 WARNING: wp cache flush failed - $wp_cache_output"
+    fi
+
+    _state_add_completed_step "10"
+    _success "Step 10 complete: Final steps done"
+    _log "STEP 10 COMPLETE: cyber.html created, caches cleared"
     echo
     return 0
 }
@@ -2751,6 +3703,23 @@ while [[ $# -gt 0 ]]; do
             ;;
         --force-db)
             FORCE_DB="1"
+            shift
+            ;;
+        --skip-db)
+            SKIP_DB="1"
+            shift
+            ;;
+        --dns-integration)
+            if [[ -z "$2" || "$2" == -* ]]; then
+                _usage
+                _error "No DNS integration ID provided after --dns-integration flag"
+                exit 1
+            fi
+            DNS_INTEGRATION_ID="$2"
+            shift 2
+            ;;
+        --dns-integration-skip)
+            DNS_INTEGRATION_SKIP="1"
             shift
             ;;
         --list-states)
@@ -3037,6 +4006,27 @@ else
     fi
 fi
 
+# Step 1.1: Validate system users
+if ! _run_step "1.1" _step_1_1; then
+    _error "Migration failed at Step 1.1"
+    _log "Migration FAILED at Step 1.1"
+    exit 1
+fi
+
+# Step 1.2: Get domain routing
+if ! _run_step "1.2" _step_1_2; then
+    _error "Migration failed at Step 1.2"
+    _log "Migration FAILED at Step 1.2"
+    exit 1
+fi
+
+# Step 1.3: Get SSL and DNS integration info
+if ! _run_step "1.3" _step_1_3; then
+    _error "Migration failed at Step 1.3"
+    _log "Migration FAILED at Step 1.3"
+    exit 1
+fi
+
 # Step 2.1: Resolve server IPs
 if ! _run_step "2.1" _step_2_1; then
     _error "Migration failed at Step 2.1"
@@ -3128,18 +4118,45 @@ if ! _run_step "5.3" _step_5_3; then
     exit 1
 fi
 
-# Step 6: Copy user-config.php
+# Step 6: Copy user-configs.php
 if ! _run_step "6" _step_6; then
     _error "Migration failed at Step 6"
     _log "Migration FAILED at Step 6"
     exit 1
 fi
 
-# Stop after the last implemented step.
-# If a specific step was requested and it's not implemented, fail clearly.
+# Step 7: Sync domain route
+if ! _run_step "7" _step_7; then
+    _error "Migration failed at Step 7"
+    _log "Migration FAILED at Step 7"
+    exit 1
+fi
+
+# Step 8: Enable DNS Integration on Destination
+if ! _run_step "8" _step_8; then
+    _error "Migration failed at Step 8"
+    _log "Migration FAILED at Step 8"
+    exit 1
+fi
+
+# Step 9: Enable SSL on Destination
+if ! _run_step "9" _step_9; then
+    _error "Migration failed at Step 9"
+    _log "Migration FAILED at Step 9"
+    exit 1
+fi
+
+# Step 10: Final Steps (cyber.html, cache flush)
+if ! _run_step "10" _step_10; then
+    _error "Migration failed at Step 10"
+    _log "Migration FAILED at Step 10"
+    exit 1
+fi
+
+# All steps completed successfully
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.2|5.3|6)
+        1|1.1|1.2|1.3|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.2|5.3|6|7|8|9|10)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"
@@ -3149,5 +4166,5 @@ if [[ -n "$RUN_STEP" ]]; then
     esac
 fi
 
-_log "Stopping after Step 6 (remaining steps not implemented yet)"
+_success "Migration completed successfully!"
 exit 0

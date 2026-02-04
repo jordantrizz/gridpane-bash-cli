@@ -1,0 +1,189 @@
+{
+  "endpoint": "/oauth/api/v1/domain",
+  "description": "Domain management endpoint for GridPane API",
+  "methods": {
+    "GET": {
+      "description": "Get all domains or a specific domain",
+      "endpoints": [
+        {
+          "path": "/domain",
+          "description": "Get all domains belonging to user (paginated)",
+          "pagination": {
+            "per_page": "integer (default: 15, max: 500)",
+            "page": "integer"
+          }
+        },
+        {
+          "path": "/domain/{domain.id}",
+          "description": "Get specific domain by ID"
+        }
+      ]
+    },
+    "POST": {
+      "description": "Add domain to site",
+      "path": "/domain",
+      "body": {
+        "domain_url": "string - required - The domain URL to add",
+        "site_id": "integer - required - The site ID",
+        "server_id": "integer - required - The server ID",
+        "type": "string - required - Domain type: primary, alias, redirect",
+        "dns_management": "string - optional - DNS management type: none_none, dnsme_full, cloudflare_full, dnsme_challenge, cloudflare_challenge",
+        "dns_integration_id": "integer - optional - DNS integration ID"
+      }
+    },
+    "PUT": {
+      "description": "Update domain settings",
+      "path": "/domain/{domain.id}",
+      "operations": [
+        {
+          "name": "switch_to_primary_type",
+          "body": { "switch_to_primary_type": "boolean - Only accepts true" },
+          "notes": "Only alias domains can be updated to primary. Staging must be disabled."
+        },
+        {
+          "name": "update_dns_integration",
+          "body": {
+            "dns_management": "string - required - none_none, dnsme_full, cloudflare_full, dnsme_challenge, cloudflare_challenge",
+            "dns_integration_id": "integer - required"
+          },
+          "notes": "Cannot change when ssl and wildcard are enabled"
+        },
+        {
+          "name": "update_ssl",
+          "body": { "ssl": "boolean - true or false" }
+        },
+        {
+          "name": "update_routing",
+          "body": { "routing": "string - none, www, root" }
+        },
+        {
+          "name": "update_wildcard",
+          "body": { "wildcard": "boolean - true or false" }
+        }
+      ]
+    },
+    "DELETE": {
+      "description": "Delete domain by ID",
+      "path": "/domain/{domain.id}"
+    }
+  },
+  "response_structure": {
+    "list_response": {
+      "data": "array of domain objects",
+      "links": {
+        "first": "string - URL to first page",
+        "last": "string - URL to last page",
+        "prev": "string|null - URL to previous page",
+        "next": "string|null - URL to next page"
+      },
+      "meta": {
+        "current_page": "integer",
+        "from": "integer",
+        "last_page": "integer",
+        "path": "string",
+        "per_page": "integer",
+        "to": "integer",
+        "total": "integer"
+      }
+    }
+  },
+  "domain_object": {
+    "id": "integer - Unique domain ID",
+    "url": "string - Domain URL (e.g., 'example.com')",
+    "route": "string - Routing type: none, www, root",
+    "type": "string - Domain type: primary, alias, redirect, staging, canary",
+    "dns_management_id": "integer - DNS management integration ID",
+    "creds_need_updating": "boolean",
+    "is_ssl": "boolean - SSL enabled status",
+    "ssl_status": "string|null - SSL status: succeed, pending, failed, null",
+    "dns_connection_type": "string - DNS connection type",
+    "site_id": "integer - Associated site ID",
+    "user_id": "integer - Owner user ID",
+    "identify_code": "string|null",
+    "server_id": "integer - Server ID hosting the domain",
+    "resolved_at": "string|null - Last DNS resolution timestamp",
+    "status": "string|null",
+    "is_wildcard": "boolean - Wildcard SSL enabled",
+    "created_at": "string - ISO 8601 timestamp",
+    "updated_at": "string - ISO 8601 timestamp",
+    "deleted_at": "string|null - Soft delete timestamp",
+    "primary_is_staging": "boolean",
+    "primary_staging_enabled": "boolean",
+    "primary_canary_enabled": "boolean",
+    "user_dns": {
+      "id": "integer",
+      "user_id": "integer",
+      "dns_provider_id": "integer",
+      "name": "string|null",
+      "token": "string",
+      "secret": "string",
+      "integration_name": "string - Display name for the DNS integration",
+      "nameserver": "string|null",
+      "challenge_domain": "string|null",
+      "is_available": "boolean",
+      "number": "string|null",
+      "created_at": "string",
+      "updated_at": "string",
+      "deleted_at": "string|null",
+      "last_active_at": "string|null",
+      "provider": {
+        "id": "integer",
+        "name": "string - Provider name: none, cloudflare, dnsme, etc.",
+        "created_at": "string",
+        "updated_at": "string"
+      }
+    }
+  },
+  "example_domain": {
+    "id": 540586,
+    "url": "example.com",
+    "route": "root",
+    "type": "primary",
+    "dns_management_id": 1374,
+    "creds_need_updating": false,
+    "is_ssl": true,
+    "ssl_status": "succeed",
+    "dns_connection_type": "none",
+    "site_id": 495737,
+    "user_id": 1356,
+    "identify_code": null,
+    "server_id": 33046,
+    "resolved_at": "2023-03-28 12:25:22",
+    "status": null,
+    "is_wildcard": false,
+    "created_at": "2023-03-28T16:23:51.000000Z",
+    "updated_at": "2023-11-22T04:18:06.000000Z",
+    "deleted_at": null,
+    "primary_is_staging": false,
+    "primary_staging_enabled": false,
+    "primary_canary_enabled": false,
+    "user_dns": {
+      "id": 1374,
+      "user_id": 1356,
+      "dns_provider_id": 0,
+      "name": null,
+      "token": "",
+      "secret": "",
+      "integration_name": "DNS Integration Name",
+      "nameserver": null,
+      "challenge_domain": null,
+      "is_available": true,
+      "number": null,
+      "created_at": "2020-03-06T09:09:24.000000Z",
+      "updated_at": "2021-04-26T06:28:50.000000Z",
+      "deleted_at": null,
+      "last_active_at": "2020-08-18 20:47:19",
+      "provider": {
+        "id": 0,
+        "name": "none",
+        "created_at": "2020-03-06T09:09:16.000000Z",
+        "updated_at": "2020-03-06T09:09:16.000000Z"
+      }
+    }
+  },
+  "notes": {
+    "cache_format": "Cache file should be a flat array of domain objects, not nested arrays",
+    "lookup_fields": "Domains can be looked up by: url, domain_url, or name field",
+    "pagination_handling": "When caching with pagination, all pages should be combined into a single flat array using: jq -s '[ .[].data[] ]' on the raw API responses"
+  }
+}

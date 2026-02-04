@@ -16,7 +16,7 @@
 * Default pagination is `GPBC_DEFAULT_PER_PAGE=500` for all cache operations
 
 ### API Responses
-* Some endpoints return nested arrays `[[ ... ]]` - handle with jq: `(if type == "array" and (.[0] | type) == "array" then .[0] else . end)`
+* Some cache files may contain nested arrays (from paginated API responses) - use jq `flatten` to handle both flat and nested arrays: `flatten | .[]`
 * The `gp_api` function handles 429 rate limiting with 15-second backoff and 1 retry
 
 ### Adding New Commands

@@ -37,6 +37,13 @@ function _usage() {
     echo "      api <endpoint>              - Run an API endpoint (GET only)"
     echo "      test-token                  - Test the API token"
     echo
+    echo "  User:"
+    echo "      get-user                    - Get current user account info (formatted)"
+    echo "      get-user-json               - Get current user account info (JSON)"
+    echo "      get-integrations            - Get all integrations available to user (JSON)"
+    echo "      list-integrations           - List integrations from cache (formatted table)"
+    echo "      cache-integrations          - Cache integrations from the API"
+    echo
     echo "  Servers:"
     echo "      get-servers                 - Fetch servers with page support and json combine"
     echo "      list-servers                - List servers"
@@ -223,7 +230,19 @@ elif [[ $CMD == "api" ]]; then
 # -- test-token
 elif [[ $CMD == "test-token" ]]; then
     _gp_test_token
-# -- gp-servers
+# =============================================
+# -- User Commands
+# =============================================
+elif [[ $CMD == "get-user" ]]; then
+    _gp_api_get_current_user_formatted
+elif [[ $CMD == "get-user-json" ]]; then
+    _gp_api_get_current_user
+elif [[ $CMD == "get-integrations" ]]; then
+    _gp_api_get_integrations
+elif [[ $CMD == "list-integrations" ]]; then
+    _gp_api_list_integrations
+elif [[ $CMD == "cache-integrations" ]]; then
+    _gp_api_cache_integrations
 # =============================================
 # -- Servers Commands
 # =============================================
