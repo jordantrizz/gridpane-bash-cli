@@ -1,0 +1,24 @@
+{
+  "description": "Rocket.net to GridPane site migration example for --json seeding",
+  "sites": [
+    {
+      "url": "rocket-example.com",
+      "source": {
+        "site_id": 55555,
+        "server_id": 101,
+        "server_label": "rocket-prod-1",
+        "server_ip": "203.0.113.10",
+        "system_user_id": 9001,
+        "system_user_name": "rocketuser"
+      },
+      "dest": {
+        "site_id": 66666,
+        "server_id": 202,
+        "server_label": "gp-dest-1",
+        "server_ip": "203.0.113.20",
+        "system_user_id": 9002,
+        "system_user_name": "gpuser"
+      }
+    }
+  ]
+}

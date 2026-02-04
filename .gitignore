@@ -6,3 +6,4 @@ logs/*.log
 state/*
 !logs/.placeholder
 !state/.placeholder
+conf/*

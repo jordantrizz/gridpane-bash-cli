@@ -45,3 +45,8 @@ You can export to a file:
 ```bash
 ./gp-api.sh -c report-server-sites --csv > report.csv
 ```
+
+## Migration examples
+- Example seed files for gp-site-mig.sh live in [conf/gp-site-mig.json.example](conf/gp-site-mig.json.example) and [conf/gp-site-mig.csv.example](conf/gp-site-mig.csv.example).
+- Rocket.net-to-GridPane samples: [conf/rocket-gp-site-mig.json.example](conf/rocket-gp-site-mig.json.example) and [conf/rocket-gp-site-mig.csv.example](conf/rocket-gp-site-mig.csv.example).
+- Run gp-site-mig with `--json conf/rocket-gp-site-mig.json.example` or `--csv conf/rocket-gp-site-mig.csv.example` to seed state; Rocket-style `public_html` docroots are accepted via the normalization logic in [gp-site-mig.sh](gp-site-mig.sh#L1739-L1765).
