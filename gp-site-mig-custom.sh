@@ -53,8 +53,8 @@ function _usage() {
     echo "  --force-db                      Force database migration even if marker exists on destination"
     echo "  --skip-db                       Skip database migration if marker already exists (continue to next step)"
     echo "  --step <step>                   Run a specific step only (e.g., 3 or 2.1)"
-    echo "  --dns-integration <id>          Specify destination DNS integration ID (for Step 1.3)"
-    echo "  --dns-integration-skip          Skip destination DNS integration lookup in Step 1.3"
+    echo "  --dns-integration <id>          Specify destination DNS integration ID (used in Step 8)"
+    echo "  --dns-integration-skip          Skip destination DNS integration lookup in Step 8"
     echo "  --list-states                   List all migration state files"
     echo "  --clear-state                   Clear state file for the specified site (-s required)"
     echo "  --fix-state                     Deduplicate completed_steps in state file (-s required)"
@@ -64,7 +64,6 @@ function _usage() {
     echo "  1      - Validate source/destination site via caches (or load seed file)"
     echo "  1.1    - Validate system users"
     echo "  1.2    - Capture primary domain routing"
-    echo "  1.3    - Capture SSL + DNS integration info (select destination integration)"
     echo "  2      - Server discovery and SSH validation"
     echo "    2.1  - Resolve server IPs from cache"
     echo "    2.2  - Test SSH to source and destination"
@@ -334,7 +333,6 @@ function _load_data_from_file() {
     _state_add_completed_step "1"
     _state_add_completed_step "1.1"
     _state_add_completed_step "1.2"
-    _state_add_completed_step "1.3"
     _state_add_completed_step "2.1"
     
     _log "STEP 1: Site data loaded from file: $DATA_FILE"
@@ -809,6 +807,54 @@ function _step_1_1() {
 }
 
 # -----------------------------------------------------------------------------
+# Resolve routing by curling apex and www and following redirects
+# Returns: "<route>|<apex_effective>|<www_effective>" where route is root/www/none
+# -----------------------------------------------------------------------------
+function _curl_effective_url() {
+    local url="$1"
+    local effective
+    effective=$(curl -ksL -o /dev/null -w '%{url_effective}' "$url" 2>/dev/null)
+    [[ $? -ne 0 ]] && effective=""
+    echo "$effective"
+}
+
+function _detect_route_from_http() {
+    local domain="$1"
+
+    local apex_effective www_effective apex_host www_host route
+    apex_effective=$(_curl_effective_url "http://${domain}")
+    [[ -z "$apex_effective" ]] && apex_effective=$(_curl_effective_url "https://${domain}")
+
+    www_effective=$(_curl_effective_url "http://www.${domain}")
+    [[ -z "$www_effective" ]] && www_effective=$(_curl_effective_url "https://www.${domain}")
+
+    apex_host=$(echo "$apex_effective" | awk -F/ '{print $3}' | sed 's/:.*//')
+    www_host=$(echo "$www_effective" | awk -F/ '{print $3}' | sed 's/:.*//')
+
+    local apex_dom="$domain"
+    local www_dom="www.${domain}"
+    route="none"
+
+    if [[ -z "$apex_host" && -z "$www_host" ]]; then
+        route="none"
+    elif [[ "$apex_host" == "$www_dom" && ( "$www_host" == "$www_dom" || -z "$www_host" ) ]]; then
+        route="www"
+    elif [[ "$www_host" == "$apex_dom" && ( "$apex_host" == "$apex_dom" || -z "$apex_host" ) ]]; then
+        route="root"
+    elif [[ "$apex_host" == "$apex_dom" && "$www_host" == "$apex_dom" ]]; then
+        route="root"
+    elif [[ "$apex_host" == "$www_dom" && "$www_host" == "$www_dom" ]]; then
+        route="www"
+    else
+        route="none"
+    fi
+
+    _debug "Route detect ($domain): apex->$apex_effective (host=$apex_host), www->$www_effective (host=$www_host), route=$route"
+
+    echo "$route|$apex_effective|$www_effective"
+}
+
+# -----------------------------------------------------------------------------
 # Step 1.2 - Get domain routing for source and destination
 # Gets the primary domain for source/dest sites from domains cache
 # Reads the route field (none, www, root) for both
@@ -818,87 +864,37 @@ function _step_1_2() {
     _loading "Step 1.2: Get domain routing"
     _log "STEP 1.2: Starting domain routing lookup"
 
-    # Read site IDs from state
-    local source_site_id dest_site_id
-    source_site_id=$(_state_read ".data.source_site_id")
-    dest_site_id=$(_state_read ".data.dest_site_id")
+    # Always infer via HTTP (no GridPane domain caches/API)
+    local source_domain_url dest_domain_url source_domain_id dest_domain_id
 
-    if [[ -z "$source_site_id" || "$source_site_id" == "null" ]]; then
-        _error "Source site ID not found in state. Run Step 1 first."
-        _log "STEP 1.2 FAILED: source_site_id not in state"
-        return 1
-    fi
+    source_domain_url=$(_state_read ".data.source_domain_url")
+    [[ -z "$source_domain_url" || "$source_domain_url" == "null" ]] && source_domain_url=$(_state_read ".data.source_site_url")
+    [[ -z "$source_domain_url" || "$source_domain_url" == "null" ]] && source_domain_url="$SITE"
 
-    if [[ -z "$dest_site_id" || "$dest_site_id" == "null" ]]; then
-        _error "Destination site ID not found in state. Run Step 1 first."
-        _log "STEP 1.2 FAILED: dest_site_id not in state"
-        return 1
-    fi
+    dest_domain_url=$(_state_read ".data.dest_domain_url")
+    [[ -z "$dest_domain_url" || "$dest_domain_url" == "null" ]] && dest_domain_url=$(_state_read ".data.dest_site_url")
+    [[ -z "$dest_domain_url" || "$dest_domain_url" == "null" ]] && dest_domain_url="$SITE"
 
-    # --- Source Domain ---
-    _loading2 "Looking up source domain for site_id=$source_site_id"
-    local source_domain_cache="${CACHE_DIR}/${SOURCE_PROFILE}_domain.json"
-    
-    if [[ ! -f "$source_domain_cache" ]]; then
-        _error "Domain cache not found for source profile '$SOURCE_PROFILE'"
-        _loading3 "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-domains"
-        _log "STEP 1.2 FAILED: Source domain cache not found"
-        return 1
-    fi
+    source_domain_id=$(_state_read ".data.source_domain_id")
+    [[ -z "$source_domain_id" || "$source_domain_id" == "null" ]] && source_domain_id="http-derived"
 
-    # Find primary domain for source site (flatten handles nested arrays from pagination)
-    # Use jq -s to slurp results into array and select first match
-    local source_domain_data
-    source_domain_data=$(jq --arg site_id "$source_site_id" \
-        '[flatten | .[] | select(.site_id == ($site_id | tonumber) and .type == "primary")] | .[0]' \
-        "$source_domain_cache" 2>/dev/null)
-    
-    if [[ -z "$source_domain_data" || "$source_domain_data" == "null" ]]; then
-        _error "Primary domain not found for source site_id=$source_site_id"
-        _log "STEP 1.2 FAILED: Source primary domain not found"
-        return 1
-    fi
+    dest_domain_id=$(_state_read ".data.dest_domain_id")
+    [[ -z "$dest_domain_id" || "$dest_domain_id" == "null" ]] && dest_domain_id="http-derived"
 
-    local source_domain_id source_domain_url source_route
-    source_domain_id=$(echo "$source_domain_data" | jq -r '.id')
-    source_domain_url=$(echo "$source_domain_data" | jq -r '.url')
-    source_route=$(echo "$source_domain_data" | jq -r '.route // "none"')
+    local source_route source_apex_effective source_www_effective
+    local dest_route dest_apex_effective dest_www_effective
 
-    _loading3 "Source primary domain: $source_domain_url (id=$source_domain_id, route=$source_route)"
-    _debug "Source domain data: $source_domain_data"
+    IFS='|' read -r source_route source_apex_effective source_www_effective <<< "$(_detect_route_from_http "$source_domain_url")"
+    [[ -z "$source_route" ]] && source_route="none"
 
-    # --- Destination Domain ---
-    _loading2 "Looking up destination domain for site_id=$dest_site_id"
-    local dest_domain_cache="${CACHE_DIR}/${DEST_PROFILE}_domain.json"
-    
-    if [[ ! -f "$dest_domain_cache" ]]; then
-        _error "Domain cache not found for destination profile '$DEST_PROFILE'"
-        _loading3 "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-domains"
-        _log "STEP 1.2 FAILED: Destination domain cache not found"
-        return 1
-    fi
+    IFS='|' read -r dest_route dest_apex_effective dest_www_effective <<< "$(_detect_route_from_http "$dest_domain_url")"
+    [[ -z "$dest_route" ]] && dest_route="none"
 
-    # Find primary domain for destination site
-    local dest_domain_data
-    dest_domain_data=$(jq --arg site_id "$dest_site_id" \
-        '[flatten | .[] | select(.site_id == ($site_id | tonumber) and .type == "primary")] | .[0]' \
-        "$dest_domain_cache" 2>/dev/null)
-    
-    if [[ -z "$dest_domain_data" || "$dest_domain_data" == "null" ]]; then
-        _error "Primary domain not found for destination site_id=$dest_site_id"
-        _log "STEP 1.2 FAILED: Destination primary domain not found"
-        return 1
-    fi
+    _loading3 "Source domain: $source_domain_url (id=$source_domain_id, route=$source_route)"
+    _loading3 "Destination domain: $dest_domain_url (id=$dest_domain_id, route=$dest_route)"
+    _debug "Source routing check: apex->$source_apex_effective, www->$source_www_effective"
+    _debug "Destination routing check: apex->$dest_apex_effective, www->$dest_www_effective"
 
-    local dest_domain_id dest_domain_url dest_route
-    dest_domain_id=$(echo "$dest_domain_data" | jq -r '.id')
-    dest_domain_url=$(echo "$dest_domain_data" | jq -r '.url')
-    dest_route=$(echo "$dest_domain_data" | jq -r '.route // "none"')
-
-    _loading3 "Destination primary domain: $dest_domain_url (id=$dest_domain_id, route=$dest_route)"
-    _debug "Destination domain data: $dest_domain_data"
-
-    # Compare routes
     if [[ "$source_route" == "$dest_route" ]]; then
         _loading3 "Routes match: $source_route"
     else
@@ -906,7 +902,6 @@ function _step_1_2() {
         _loading3 "Step 7 will sync the route from source to destination"
     fi
 
-    # Store to state
     _state_write ".data.source_domain_id" "$source_domain_id"
     _state_write ".data.source_domain_url" "$source_domain_url"
     _state_write ".data.source_route" "$source_route"
@@ -915,175 +910,8 @@ function _step_1_2() {
     _state_write ".data.dest_route" "$dest_route"
 
     _state_add_completed_step "1.2"
-    _success "Step 1.2 complete: Domain routing captured"
+    _success "Step 1.2 complete: Domain routing captured via HTTP"
     _log "STEP 1.2 COMPLETE: source_route=$source_route, dest_route=$dest_route"
-    echo
-    return 0
-}
-
-# -----------------------------------------------------------------------------
-# Step 1.3 - Get SSL status and DNS integration for source
-# Reads: is_ssl, ssl_status, is_wildcard from source primary domain
-# Reads: user_dns.integration_name, user_dns.provider.name, dns_management_id
-# Queries destination DNS integrations via GET /user/integration
-# Stores: source_is_ssl, source_ssl_status, source_is_wildcard, source_dns_provider,
-#         source_dns_integration_id, dest_dns_integration_id
-# -----------------------------------------------------------------------------
-function _step_1_3() {
-    _loading "Step 1.3: Get SSL and DNS integration info"
-    _log "STEP 1.3: Starting SSL and DNS integration lookup"
-
-    # Read site/domain IDs from state
-    local source_site_id source_domain_id
-    source_site_id=$(_state_read ".data.source_site_id")
-    source_domain_id=$(_state_read ".data.source_domain_id")
-
-    if [[ -z "$source_domain_id" || "$source_domain_id" == "null" ]]; then
-        _error "Source domain ID not found in state. Run Step 1.2 first."
-        _log "STEP 1.3 FAILED: source_domain_id not in state"
-        return 1
-    fi
-
-    # --- Source Domain SSL and DNS Info ---
-    _loading2 "Reading SSL and DNS info for source domain_id=$source_domain_id"
-    local source_domain_cache="${CACHE_DIR}/${SOURCE_PROFILE}_domain.json"
-    
-    local source_domain_data
-    source_domain_data=$(jq --arg domain_id "$source_domain_id" \
-        '[flatten | .[] | select(.id == ($domain_id | tonumber))] | .[0]' \
-        "$source_domain_cache" 2>/dev/null)
-    
-    if [[ -z "$source_domain_data" || "$source_domain_data" == "null" ]]; then
-        _error "Domain not found in cache for domain_id=$source_domain_id"
-        _log "STEP 1.3 FAILED: Source domain not found in cache"
-        return 1
-    fi
-
-    # Extract SSL info
-    local source_is_ssl source_ssl_status source_is_wildcard
-    source_is_ssl=$(echo "$source_domain_data" | jq -r '.is_ssl // false')
-    source_ssl_status=$(echo "$source_domain_data" | jq -r '.ssl_status // "null"')
-    source_is_wildcard=$(echo "$source_domain_data" | jq -r '.is_wildcard // false')
-
-    _loading3 "SSL: enabled=$source_is_ssl, status=$source_ssl_status, wildcard=$source_is_wildcard"
-
-    # Extract DNS integration info
-    local source_dns_management_id source_dns_integration_name source_dns_provider_name
-    source_dns_management_id=$(echo "$source_domain_data" | jq -r '.dns_management_id // "null"')
-    source_dns_integration_name=$(echo "$source_domain_data" | jq -r '.user_dns.integration_name // "none"')
-    source_dns_provider_name=$(echo "$source_domain_data" | jq -r '.user_dns.provider.name // "none"')
-
-    _loading3 "DNS: provider=$source_dns_provider_name, integration=$source_dns_integration_name (id=$source_dns_management_id)"
-    _debug "Source domain full data: $source_domain_data"
-
-    # --- Destination DNS Integrations ---
-    if [[ "$DNS_INTEGRATION_SKIP" == "1" ]]; then
-        _loading2 "Skipping destination DNS integration lookup (--dns-integration-skip)"
-        _state_write ".data.dest_dns_integration_id" "skipped"
-        _log "STEP 1.3: DNS integration lookup skipped by user"
-    elif [[ -n "$DNS_INTEGRATION_ID" ]]; then
-        # User specified DNS integration ID - use it directly without API query
-        _loading2 "Using specified DNS integration: $DNS_INTEGRATION_ID (--dns-integration)"
-        _state_write ".data.dest_dns_integration_id" "$DNS_INTEGRATION_ID"
-        _log "STEP 1.3: Using user-specified DNS integration ID: $DNS_INTEGRATION_ID"
-    else
-    _loading2 "Querying destination DNS integrations..."
-    
-    # Save current profile and switch to destination
-    local saved_token="$GPBC_TOKEN"
-    local saved_token_name="$GPBC_TOKEN_NAME"
-    
-    if ! _gp_set_profile_silent "$DEST_PROFILE"; then
-        _error "Failed to switch to destination profile: $DEST_PROFILE"
-        _log "STEP 1.3 FAILED: Could not switch to destination profile"
-        return 1
-    fi
-
-    # Query integrations API
-    local integrations_output
-    _debug "Fetching integrations with profile: $GPBC_TOKEN_NAME"
-    if ! gp_api GET "/user/integrations"; then
-        _error "Failed to fetch integrations from destination profile"
-        _error "API Error: $API_ERROR"
-        _debug "API Output: $API_OUTPUT"
-        _log "STEP 1.3 FAILED: Could not fetch destination integrations - $API_ERROR"
-        GPBC_TOKEN="$saved_token"
-        GPBC_TOKEN_NAME="$saved_token_name"
-        return 1
-    fi
-    integrations_output="$API_OUTPUT"
-    _debug "Integrations response: $integrations_output"
-
-    # Restore original profile
-    GPBC_TOKEN="$saved_token"
-    GPBC_TOKEN_NAME="$saved_token_name"
-
-    # Filter for DNS integrations (cloudflare, dnsme, etc.)
-    local dns_integrations dns_integration_count
-    dns_integrations=$(echo "$integrations_output" | jq '[.integrations[] | select(.integrated_service == "cloudflare" or .integrated_service == "dnsme")]')
-    dns_integration_count=$(echo "$dns_integrations" | jq 'length')
-
-    _debug "Found $dns_integration_count DNS integrations on destination"
-    _debug "DNS integrations: $dns_integrations"
-
-    local dest_dns_integration_id=""
-
-    if [[ "$dns_integration_count" -eq 0 ]]; then
-        _loading3 "No DNS integrations found on destination profile"
-        _log "STEP 1.3: No DNS integrations on destination"
-        dest_dns_integration_id="none"
-    elif [[ "$dns_integration_count" -eq 1 ]]; then
-        # Single integration - use it automatically
-        dest_dns_integration_id=$(echo "$dns_integrations" | jq -r '.[0].id')
-        local dest_dns_integration_name dest_dns_service
-        dest_dns_integration_name=$(echo "$dns_integrations" | jq -r '.[0].integration_name')
-        dest_dns_service=$(echo "$dns_integrations" | jq -r '.[0].integrated_service')
-        _loading3 "Using destination DNS integration: $dest_dns_integration_name ($dest_dns_service, id=$dest_dns_integration_id)"
-        _log "STEP 1.3: Auto-selected destination DNS integration: $dest_dns_integration_name (id=$dest_dns_integration_id)"
-    else
-        # Multiple integrations - check if --dns-integration was provided
-        if [[ -n "$DNS_INTEGRATION_ID" ]]; then
-            # Verify the provided ID exists
-            local valid_id
-            valid_id=$(echo "$dns_integrations" | jq --arg id "$DNS_INTEGRATION_ID" '[.[] | select(.id == ($id | tonumber))] | length')
-            if [[ "$valid_id" -eq 1 ]]; then
-                dest_dns_integration_id="$DNS_INTEGRATION_ID"
-                local dest_dns_integration_name
-                dest_dns_integration_name=$(echo "$dns_integrations" | jq -r --arg id "$DNS_INTEGRATION_ID" '.[] | select(.id == ($id | tonumber)) | .integration_name')
-                _loading3 "Using specified DNS integration: $dest_dns_integration_name (id=$dest_dns_integration_id)"
-                _log "STEP 1.3: Using specified destination DNS integration: $dest_dns_integration_name (id=$dest_dns_integration_id)"
-            else
-                _error "Specified DNS integration ID '$DNS_INTEGRATION_ID' not found on destination"
-                _log "STEP 1.3 FAILED: Invalid DNS integration ID specified"
-                return 1
-            fi
-        else
-            # Multiple integrations and no --dns-integration flag
-            _error "Multiple DNS integrations found on destination profile. Please specify one with --dns-integration <id>"
-            echo
-            echo "Available DNS integrations on $DEST_PROFILE:"
-            echo "$dns_integrations" | jq -r '.[] | "  ID: \(.id) - \(.integration_name) (\(.integrated_service))"'
-            echo
-            _log "STEP 1.3 FAILED: Multiple DNS integrations, none specified"
-            return 1
-        fi
-    fi
-
-    # Store dest_dns_integration_id to state
-    _state_write ".data.dest_dns_integration_id" "$dest_dns_integration_id"
-    fi  # End of DNS_INTEGRATION_SKIP check
-
-    # Store to state
-    _state_write ".data.source_is_ssl" "$source_is_ssl"
-    _state_write ".data.source_ssl_status" "$source_ssl_status"
-    _state_write ".data.source_is_wildcard" "$source_is_wildcard"
-    _state_write ".data.source_dns_management_id" "$source_dns_management_id"
-    _state_write ".data.source_dns_integration_name" "$source_dns_integration_name"
-    _state_write ".data.source_dns_provider" "$source_dns_provider_name"
-
-    _state_add_completed_step "1.3"
-    _success "Step 1.3 complete: SSL and DNS integration info captured"
-    _log "STEP 1.3 COMPLETE: ssl=$source_is_ssl, dns_provider=$source_dns_provider_name, dest_dns_id=$dest_dns_integration_id"
     echo
     return 0
 }
@@ -3391,7 +3219,7 @@ function _step_7() {
 # -----------------------------------------------------------------------------
 # Step 8 - Cloudflare DNS Integration
 # Enables DNS integration on destination domain if configured
-# Uses dest_dns_integration_id from state (captured in Step 1.3)
+# Uses dest_dns_integration_id from state (set via flags or prior runs)
 # -----------------------------------------------------------------------------
 function _step_8() {
     _loading "Step 8: Enable DNS Integration on Destination"
@@ -3414,7 +3242,7 @@ function _step_8() {
     dest_domain_id=$(_state_read ".data.dest_domain_id")
     source_dns_provider=$(_state_read ".data.source_dns_provider")
 
-    # Check if DNS integration was skipped (state value from Step 1.3)
+    # Check if DNS integration was skipped (state value from earlier run/flag)
     if [[ "$dest_dns_integration_id" == "skipped" ]]; then
         _loading2 "DNS integration was skipped via --dns-integration-skip flag"
         _log "STEP 8: DNS integration skipped by user flag"
@@ -4212,13 +4040,6 @@ if ! _run_step "1.2" _step_1_2; then
     exit 1
 fi
 
-# Step 1.3: Get SSL and DNS integration info
-if ! _run_step "1.3" _step_1_3; then
-    _error "Migration failed at Step 1.3"
-    _log "Migration FAILED at Step 1.3"
-    exit 1
-fi
-
 # Step 2.1: Resolve server IPs
 if ! _run_step "2.1" _step_2_1; then
     _error "Migration failed at Step 2.1"
@@ -4357,7 +4178,7 @@ fi
 # All steps completed successfully
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|1.1|1.2|1.3|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.2|5.3|6|7|8|9|10)
+        1|1.1|1.2|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.2|5.3|6|7|8|9|10)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"
