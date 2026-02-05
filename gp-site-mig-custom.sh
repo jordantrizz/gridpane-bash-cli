@@ -52,7 +52,7 @@ function _usage() {
     echo "  --db-file                       Use file-based DB migration (dump to file, gzip, transfer, import)"
     echo "  --force-db                      Force database migration even if marker exists on destination"
     echo "  --skip-db                       Skip database migration if marker already exists (continue to next step)"
-    echo "  --step <step>                   Run a specific step only (e.g., 3 or 2.1)"
+    echo "  --step <step>                   Run a specific step only (e.g., 3 or 2.2)"
     echo "  --dns-integration <id>          Specify destination DNS integration ID (used in Step 8)"
     echo "  --dns-integration-skip          Skip destination DNS integration lookup in Step 8"
     echo "  --list-states                   List all migration state files"
@@ -65,7 +65,6 @@ function _usage() {
     echo "  1.1    - Validate system users"
     echo "  1.2    - Capture primary domain routing"
     echo "  2      - Server discovery and SSH validation"
-    echo "    2.1  - Resolve server IPs from cache"
     echo "    2.2  - Test SSH to source and destination"
     echo "    2.5  - Locate wp-config.php and set site/htdocs paths"
     echo "    2.3  - Read DB_NAME and credentials from wp-config.php"
@@ -331,9 +330,7 @@ function _load_data_from_file() {
     
     # Mark step 1 as complete (data loaded from file replaces API validation)
     _state_add_completed_step "1"
-    _state_add_completed_step "1.1"
-    _state_add_completed_step "1.2"
-    _state_add_completed_step "2.1"
+    _log "STEP 2 COMPLETE: Server discovery and SSH validation done"
     
     _log "STEP 1: Site data loaded from file: $DATA_FILE"
     return 0
@@ -406,7 +403,7 @@ function _state_write() {
 }
 
 # Append step to completed_steps array (only if not already present)
-# Usage: _state_add_completed_step "1" or _state_add_completed_step "2.1"
+# Usage: _state_add_completed_step "1" or _state_add_completed_step "2.2"
 function _state_add_completed_step() {
     local step="$1"
     
@@ -436,7 +433,7 @@ function _state_add_completed_step() {
 }
 
 # Check if step already completed
-# Usage: if _state_is_step_completed "2.1"; then echo "Skip"; fi
+# Usage: if _state_is_step_completed "2.2"; then echo "Skip"; fi
 function _state_is_step_completed() {
     local step="$1"
     
@@ -1013,77 +1010,8 @@ function _run_step() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 2.1 - Get server IPs from cache
-# Requires Step 1 (server IDs) and profile server caches
-# Stores: source_server_ip, dest_server_ip (and re-stores labels if available)
-# -----------------------------------------------------------------------------
-function _step_2_1() {
-    _loading "Step 2.1: Resolving server IPs"
-    _log "STEP 2.1: Resolving server IPs"
-
-    local source_server_id dest_server_id
-    source_server_id=$(_state_read ".data.source_server_id")
-    dest_server_id=$(_state_read ".data.dest_server_id")
-
-    if [[ -z "$source_server_id" || -z "$dest_server_id" ]]; then
-        _error "Missing server IDs in state. Run Step 1 first."
-        _log "STEP 2.1 FAILED: Missing server IDs in state"
-        return 1
-    fi
-
-    local source_server_cache dest_server_cache
-    source_server_cache=$(_server_cache_file_for_profile "$SOURCE_PROFILE")
-    dest_server_cache=$(_server_cache_file_for_profile "$DEST_PROFILE")
-
-    if [[ ! -f "$source_server_cache" ]]; then
-        _error "Server cache not found for source profile '$SOURCE_PROFILE'"
-        _error "Run: ./gp-api.sh -p $SOURCE_PROFILE -c cache-servers"
-        _log "STEP 2.1 FAILED: Missing source server cache"
-        return 1
-    fi
-
-    if [[ ! -f "$dest_server_cache" ]]; then
-        _error "Server cache not found for destination profile '$DEST_PROFILE'"
-        _error "Run: ./gp-api.sh -p $DEST_PROFILE -c cache-servers"
-        _log "STEP 2.1 FAILED: Missing destination server cache"
-        return 1
-    fi
-
-    local source_server_label source_server_ip dest_server_label dest_server_ip
-    source_server_label=$(_resolve_server_label_for_profile "$SOURCE_PROFILE" "$source_server_id")
-    source_server_ip=$(_resolve_server_ip_for_profile "$SOURCE_PROFILE" "$source_server_id")
-    dest_server_label=$(_resolve_server_label_for_profile "$DEST_PROFILE" "$dest_server_id")
-    dest_server_ip=$(_resolve_server_ip_for_profile "$DEST_PROFILE" "$dest_server_id")
-
-    if [[ -z "$source_server_ip" || "$source_server_ip" == "UNKNOWN" ]]; then
-        _error "Could not resolve source server IP (server_id=$source_server_id)"
-        _log "STEP 2.1 FAILED: Could not resolve source server IP"
-        return 1
-    fi
-
-    if [[ -z "$dest_server_ip" || "$dest_server_ip" == "UNKNOWN" ]]; then
-        _error "Could not resolve destination server IP (server_id=$dest_server_id)"
-        _log "STEP 2.1 FAILED: Could not resolve destination server IP"
-        return 1
-    fi
-
-    _success "Resolved source server: ${source_server_label:-UNKNOWN} ($source_server_ip)"
-    _success "Resolved dest server:   ${dest_server_label:-UNKNOWN} ($dest_server_ip)"
-
-    _state_write ".data.source_server_ip" "$source_server_ip"
-    _state_write ".data.dest_server_ip" "$dest_server_ip"
-    [[ -n "$source_server_label" ]] && _state_write ".data.source_server_label" "$source_server_label"
-    [[ -n "$dest_server_label" ]] && _state_write ".data.dest_server_label" "$dest_server_label"
-
-    _state_add_completed_step "2.1"
-    _log "STEP 2.1 COMPLETE: Server IPs resolved"
-    echo
-    return 0
-}
-
-# -----------------------------------------------------------------------------
 # Step 2.2 - Test SSH connectivity
-# Requires Step 2.1 (server IPs)
+# Requires server IPs in state
 # -----------------------------------------------------------------------------
 function _step_2_2() {
     _loading "Step 2.2: Testing SSH connectivity"
@@ -1095,8 +1023,8 @@ function _step_2_2() {
     custom_mode=$(_state_read ".data.custom_source")
 
     if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
-        _error "Missing server IPs in state. Run Step 2.1 first."
-        _log "STEP 2.2 FAILED: Missing server IPs in state"
+        _error "Missing server IPs in state. Provide IPs via seed/state before SSH checks."
+        _log "STEP 2.5 FAILED: Missing server IPs in state"
         return 1
     fi
 
@@ -1368,8 +1296,8 @@ function _step_2_5() {
     dest_server_ip=$(_state_read ".data.dest_server_ip")
 
     if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
-        _error "Missing server IPs in state. Run Step 2.1 first."
-        _log "STEP 2.5 FAILED: Missing server IPs in state"
+        _error "Missing server IPs in state. Provide IPs via seed/state before SSH checks."
+        _log "STEP 2.2 FAILED: Missing server IPs in state"
         return 1
     fi
 
@@ -1663,7 +1591,6 @@ function _step_2() {
     _loading "Step 2: Server Discovery and SSH Validation"
     _log "STEP 2: Starting server discovery and SSH validation"
 
-    _step_2_1 || return 1
     _step_2_2 || return 1
     _step_2_5 || return 1
     _step_2_3 || return 1
@@ -1720,7 +1647,7 @@ function _normalize_htdocs_path() {
 
 # -----------------------------------------------------------------------------
 # Step 3.1 - Confirm rsync is installed on source server
-# Requires Step 2.1 (server IPs)
+# Requires server IPs in state
 # -----------------------------------------------------------------------------
 function _step_3_1() {
     _loading "Step 3.1: Verifying rsync on source server"
@@ -1730,7 +1657,7 @@ function _step_3_1() {
     source_server_ip=$(_state_read ".data.source_server_ip")
 
     if [[ -z "$source_server_ip" ]]; then
-        _error "Missing source server IP in state. Run Step 2.1 first."
+        _error "Missing source server IP in state. Provide it via seed/state before rsync checks."
         _log "STEP 3.1 FAILED: Missing source server IP"
         return 1
     fi
@@ -1755,7 +1682,7 @@ function _step_3_1() {
 
 # -----------------------------------------------------------------------------
 # Step 3.2 - Confirm rsync is installed on destination and htdocs is writable
-# Requires Step 2.1, 2.5 (server IPs and htdocs path)
+# Requires server IPs and htdocs path
 # -----------------------------------------------------------------------------
 function _step_3_2() {
     _loading "Step 3.2: Verifying rsync on destination server"
@@ -1766,7 +1693,7 @@ function _step_3_2() {
     dest_htdocs_path=$(_state_read ".data.dest_htdocs_path")
 
     if [[ -z "$dest_server_ip" ]]; then
-        _error "Missing destination server IP in state. Run Step 2.1 first."
+        _error "Missing destination server IP in state. Provide it via seed/state before rsync checks."
         _log "STEP 3.2 FAILED: Missing destination server IP"
         return 1
     fi
@@ -1837,7 +1764,7 @@ function _step_3_3() {
     [[ -z "$source_ssh_user" || "$source_ssh_user" == "null" ]] && source_ssh_user="${GPBC_SSH_USER:-root}"
 
     if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
-        _error "Missing server IPs in state. Run Step 2.1 first."
+        _error "Missing server IPs in state. Provide source/dest IPs via seed/state before SSH authorization."
         _log "STEP 3.3 FAILED: Missing server IPs"
         return 1
     fi
@@ -1993,7 +1920,7 @@ function _step_3_4() {
     _verbose "  dest_htdocs_path=$dest_htdocs_path"
 
     if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
-        _error "Missing server IPs in state. Run Step 2.1 first."
+        _error "Missing server IPs in state. Provide source/dest IPs via seed/state before file sync."
         _log "STEP 3.4 FAILED: Missing server IPs"
         return 1
     fi
@@ -2206,7 +2133,7 @@ function _step_3() {
 # -----------------------------------------------------------------------------
 # Step 4 - Migrate Database
 # Export database from source using mysqldump, pipe to mysql on destination via SSH
-# Requires Step 2.1 (server IPs), Step 2.3 (database names)
+# Requires server IPs and DB names
 # -----------------------------------------------------------------------------
 function _step_4() {
     _loading "Step 4: Migrating database"
@@ -2221,14 +2148,9 @@ function _step_4() {
     source_db_pass=$(_state_read ".data.source_db_password")
 
     if [[ -z "$source_server_ip" || -z "$dest_server_ip" ]]; then
-        _loading2 "Missing server IPs, running Step 2.1..."
-        if ! _step_2_1; then
-            _error "Failed to run prerequisite Step 2.1"
-            _log "STEP 4 FAILED: Prerequisite Step 2.1 failed"
-            return 1
-        fi
-        source_server_ip=$(_state_read ".data.source_server_ip")
-        dest_server_ip=$(_state_read ".data.dest_server_ip")
+        _error "Missing server IPs in state. Provide source/dest server_ip via seed/state before database migration."
+        _log "STEP 4 FAILED: Missing server IPs"
+        return 1
     fi
 
     if [[ -z "$source_db" || -z "$dest_db" ]]; then
@@ -2568,7 +2490,7 @@ function _step_5_1() {
     source_site_path=$(_state_read ".data.source_site_path")
 
     if [[ -z "$source_server_ip" || -z "$source_site_path" ]]; then
-        _error "Missing source server IP or site path. Run Step 2.1 and 2.5 first."
+        _error "Missing source server IP or site path. Ensure source_server_ip and source_site_path exist in state (seed + Step 2.5)."
         _log "STEP 5.1 FAILED: Missing prerequisite data"
         return 1
     fi
@@ -2676,7 +2598,7 @@ function _step_5_2() {
     special_configs=$(_state_read ".data.nginx_special_configs")
 
     if [[ -z "$dest_server_ip" ]]; then
-        _error "Missing destination server IP. Run Step 2.1 first."
+        _error "Missing destination server IP. Provide it via seed/state before nginx config commands."
         _log "STEP 5.2 FAILED: Missing dest_server_ip"
         return 1
     fi
@@ -2829,7 +2751,7 @@ function _step_5_3() {
     dest_site_path=$(_state_read ".data.dest_site_path")
 
     if [[ -z "$source_server_ip" || -z "$dest_server_ip" || -z "$source_site_path" || -z "$dest_site_path" ]]; then
-        _error "Missing required state data. Run Steps 2.1 and 2.5 first."
+        _error "Missing required state data. Ensure server IPs and site paths exist in state (seed + Step 2.5)."
         _log "STEP 5.3 FAILED: Missing prerequisite data"
         return 1
     fi
@@ -2962,7 +2884,7 @@ function _step_6() {
     dest_site_path=$(_state_read ".data.dest_site_path")
 
     if [[ -z "$source_server_ip" || -z "$dest_server_ip" || -z "$source_site_path" || -z "$dest_site_path" ]]; then
-        _error "Missing required state data. Run Steps 2.1 and 2.5 first."
+        _error "Missing required state data. Ensure server IPs and site paths exist in state (seed + Step 2.5)."
         _log "STEP 6 FAILED: Missing prerequisite data"
         return 1
     fi
@@ -4040,13 +3962,6 @@ if ! _run_step "1.2" _step_1_2; then
     exit 1
 fi
 
-# Step 2.1: Resolve server IPs
-if ! _run_step "2.1" _step_2_1; then
-    _error "Migration failed at Step 2.1"
-    _log "Migration FAILED at Step 2.1"
-    exit 1
-fi
-
 # Step 2.2: Test SSH connectivity
 if ! _run_step "2.2" _step_2_2; then
     _error "Migration failed at Step 2.2"
@@ -4178,7 +4093,7 @@ fi
 # All steps completed successfully
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|1.1|1.2|2|2.1|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.2|5.3|6|7|8|9|10)
+        1|1.1|1.2|2|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.2|5.3|6|7|8|9|10)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"
