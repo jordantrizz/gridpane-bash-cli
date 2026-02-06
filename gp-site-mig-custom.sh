@@ -77,7 +77,6 @@ function _usage() {
     echo "  4      - Migrate database (mysqldump -> mysql; honors --force-db/--skip-db)"
     echo "  5      - Nginx config migration"
     echo "    5.1  - Detect custom and special configs"
-    echo "    5.2  - Run gp commands for special configs (always disable XML-RPC)"
     echo "    5.3  - Backup and copy nginx directory to destination"
     echo "  6      - Copy user-configs.php (backup destination if present)"
     echo "  7      - Sync domain route to match source"
@@ -2585,157 +2584,6 @@ function _step_5_1() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 5.2 - Run gp commands for special nginx configs
-# Maps special config files to gp CLI commands and executes on destination
-# Non-fatal errors are logged and migration continues
-# -----------------------------------------------------------------------------
-function _step_5_2() {
-    _loading "Step 5.2: Running gp commands for special nginx configs"
-    _log "STEP 5.2: Running gp commands for special nginx configs"
-
-    local dest_server_ip special_configs
-    dest_server_ip=$(_state_read ".data.dest_server_ip")
-    special_configs=$(_state_read ".data.nginx_special_configs")
-
-    if [[ -z "$dest_server_ip" ]]; then
-        _error "Missing destination server IP. Provide it via seed/state before nginx config commands."
-        _log "STEP 5.2 FAILED: Missing dest_server_ip"
-        return 1
-    fi
-
-    if [[ -z "$special_configs" ]]; then
-        _loading3 "No special configs to process"
-        _log "STEP 5.2: No special configs to process"
-        _state_add_completed_step "5.2"
-        _success "Step 5.2 complete: No special configs to process"
-        echo
-        return 0
-    fi
-
-    # Get destination site path for checking existing configs
-    local dest_site_path
-    dest_site_path=$(_state_read ".data.dest_site_path")
-    local dest_nginx_dir="${dest_site_path}/nginx"
-
-    # Convert comma-separated list to array
-    IFS=',' read -ra config_array <<< "$special_configs"
-
-    local success_count=0
-    local skip_count=0
-    local error_count=0
-
-    for config in "${config_array[@]}"; do
-        [[ -z "$config" ]] && continue
-
-        local gp_cmd=""
-        case "$config" in
-            disable-xmlrpc-main-context.conf)
-                gp_cmd="gp site $SITE -disable-xmlrpc"
-                ;;
-            disable-wp-trackbacks-main-context.conf)
-                gp_cmd="gp site $SITE -block-wp-trackbacks.php"
-                ;;
-            disable-wp-links-opml-main-context.conf)
-                gp_cmd="gp site $SITE -block-wp-links-opml.php"
-                ;;
-            disable-wp-comments-post-main-context.conf)
-                gp_cmd="gp site $SITE -block-wp-comments-post.php"
-                ;;
-            *)
-                _verbose "Unknown special config: $config (skipping)"
-                continue
-                ;;
-        esac
-
-        # Check if config file already exists on destination
-        local check_cmd="test -f '${dest_nginx_dir}/${config}' && echo 'exists' || echo 'missing'"
-        local exists_check
-        exists_check=$(_ssh_capture "$dest_server_ip" "$check_cmd" 2>/dev/null)
-
-        if [[ "$exists_check" == "exists" ]]; then
-            _loading3 "  Skipping: $config (already exists on destination)"
-            _log "STEP 5.2: Skipping $config - already exists on destination"
-            ((skip_count++))
-            continue
-        fi
-
-        _loading2 "Executing: $gp_cmd"
-
-        if [[ "$DRY_RUN" == "1" ]]; then
-            _dry_run_msg "Would execute on destination: $gp_cmd"
-            ((success_count++))
-            continue
-        fi
-
-        local cmd_output cmd_rc
-        cmd_output=$(_ssh_capture "$dest_server_ip" "$gp_cmd" 2>&1)
-        cmd_rc=$?
-
-        if [[ $cmd_rc -ne 0 ]]; then
-            _error_log "Step 5.2: Failed to execute '$gp_cmd' on destination (exit code: $cmd_rc)"
-            [[ -n "$cmd_output" ]] && _error_log "  Output: $cmd_output"
-            ((error_count++))
-        else
-            _success "  Command succeeded: $gp_cmd"
-            _log "STEP 5.2: Successfully executed: $gp_cmd"
-            [[ -n "$cmd_output" ]] && _verbose "  Output: $cmd_output"
-            ((success_count++))
-        fi
-    done
-
-    # Always disable XML-RPC on destination (security measure) unless already set
-    local xmlrpc_config="disable-xmlrpc-main-context.conf"
-    local check_dest_cmd="test -f '${dest_nginx_dir}/${xmlrpc_config}' && echo 'exists' || echo 'missing'"
-    local dest_xmlrpc_check
-    dest_xmlrpc_check=$(_ssh_capture "$dest_server_ip" "$check_dest_cmd" 2>/dev/null)
-
-    if [[ "$dest_xmlrpc_check" == "exists" ]]; then
-        _loading3 "  Skipping: XML-RPC already disabled on destination"
-        _log "STEP 5.2: XML-RPC already disabled on destination"
-        ((skip_count++))
-    elif [[ "$DRY_RUN" == "1" ]]; then
-        _dry_run_msg "Would execute on destination: gp site $SITE -disable-xmlrpc"
-        ((success_count++))
-    else
-        _loading2 "Disabling XML-RPC on destination"
-        local gp_cmd="gp site $SITE -disable-xmlrpc"
-        local cmd_output cmd_rc
-        cmd_output=$(_ssh_capture "$dest_server_ip" "$gp_cmd" 2>&1)
-        cmd_rc=$?
-
-        if [[ $cmd_rc -ne 0 ]]; then
-            _error_log "Step 5.2: Failed to disable XML-RPC on destination (exit code: $cmd_rc)"
-            [[ -n "$cmd_output" ]] && _error_log "  Output: $cmd_output"
-            ((error_count++))
-        else
-            _success "  Command succeeded: $gp_cmd"
-            _log "STEP 5.2: Successfully disabled XML-RPC on destination"
-            [[ -n "$cmd_output" ]] && _verbose "  Output: $cmd_output"
-            ((success_count++))
-        fi
-    fi
-
-    local summary_parts=()
-    [[ $success_count -gt 0 ]] && summary_parts+=("$success_count executed")
-    [[ $skip_count -gt 0 ]] && summary_parts+=("$skip_count skipped")
-    [[ $error_count -gt 0 ]] && summary_parts+=("$error_count failed")
-    local summary_msg
-    summary_msg=$(IFS=', '; echo "${summary_parts[*]}")
-
-    if [[ $error_count -gt 0 ]]; then
-        _warning "Step 5.2 completed with errors ($summary_msg) - see error log"
-        _log "STEP 5.2 COMPLETE: $summary_msg"
-    else
-        _success "Step 5.2 complete: $summary_msg"
-        _log "STEP 5.2 COMPLETE: $summary_msg"
-    fi
-
-    _state_add_completed_step "5.2"
-    echo
-    return 0
-}
-
-# -----------------------------------------------------------------------------
 # Step 5.3 - Backup and copy nginx files to destination
 # Creates tar archive of source nginx directory and places it on destination
 # as a backup file (outside the nginx dir) for reference
@@ -2853,14 +2701,13 @@ function _step_5_3() {
 
 # -----------------------------------------------------------------------------
 # Step 5 - Migrate Nginx Config (wrapper)
-# Calls sub-steps 5.1, 5.2, 5.3
+# Calls sub-steps 5.1, 5.3
 # -----------------------------------------------------------------------------
 function _step_5() {
     _loading "Step 5: Migrate Nginx Config"
     _log "STEP 5: Starting nginx config migration"
 
     _run_step "5.1" _step_5_1 || return 1
-    _run_step "5.2" _step_5_2 || return 1
     _run_step "5.3" _step_5_3 || return 1
 
     _state_add_completed_step "5"
@@ -4032,13 +3879,6 @@ if ! _run_step "5.1" _step_5_1; then
     exit 1
 fi
 
-# Step 5.2: Run gp commands for special configs
-if ! _run_step "5.2" _step_5_2; then
-    _error "Migration failed at Step 5.2"
-    _log "Migration FAILED at Step 5.2"
-    exit 1
-fi
-
 # Step 5.3: Backup and copy nginx files
 if ! _run_step "5.3" _step_5_3; then
     _error "Migration failed at Step 5.3"
@@ -4093,7 +3933,7 @@ fi
 # All steps completed successfully
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|1.1|1.2|2|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.2|5.3|6|7|8|9|10)
+        1|1.1|1.2|2|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.3|6|7|8|9|10)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"

@@ -1,0 +1,1 @@
+gp-site-mig.sh -s $1 -sp BOLDLAYOUT -dp CYBER --dns-integration-skip --step 9
