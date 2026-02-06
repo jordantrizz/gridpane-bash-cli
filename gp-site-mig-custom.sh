@@ -75,7 +75,7 @@ function _usage() {
     echo "    5.1  - Detect custom and special configs"
     echo "  6      - Sync domain routing to match source (destination: gp site -route-domain-*)"
     echo "  7      - Enable SSL on destination if source has SSL"
-    echo "  8      - Final steps: cyber.html, gp fix cached, wp cache flush"
+    echo "  8      - Final steps: backup source wp-config.php, cyber.html, gp fix cached, wp cache flush"
     echo
     echo "State & Logs:"
     echo "  State files: $STATE_DIR/${MIG_PREFIX}-<site>.json"
@@ -2861,11 +2861,18 @@ function _step_8() {
     _log "STEP 8: Starting final steps"
 
     # Get variables from state
+    local source_server_ip source_wp_config_path
     local dest_server_ip dest_site_path dest_htdocs_path site_url
+    local dest_wp_config_backup_path
+    local source_ssh_user dest_ssh_user source_ssh_port dest_ssh_port
+    local known_hosts_file
     dest_server_ip=$(_state_read ".data.dest_server_ip")
+    source_server_ip=$(_state_read ".data.source_server_ip")
     dest_site_path=$(_state_read ".data.dest_site_path")
     dest_htdocs_path=$(_state_read ".data.dest_htdocs_path")
     site_url=$(_state_read ".site")
+    source_wp_config_path=$(_state_read ".data.source_wp_config_path")
+    dest_wp_config_backup_path="${dest_site_path}/wp-config.php.backup"
 
     # Use htdocs path if available, otherwise construct it
     if [[ -z "$dest_htdocs_path" || "$dest_htdocs_path" == "null" ]]; then
@@ -2878,11 +2885,47 @@ function _step_8() {
         return 1
     fi
 
-    local ssh_user="root"
-    local ssh_opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
-    ssh_opts+=(-o "UserKnownHostsFile=${STATE_DIR}/${MIG_PREFIX}-${SITE}-known_hosts")
+    if [[ -z "$source_server_ip" || "$source_server_ip" == "null" ]]; then
+        _error "Source server IP not found in state"
+        _log "STEP 8 FAILED: source_server_ip not in state"
+        return 1
+    fi
+
+    if [[ -z "$dest_site_path" || "$dest_site_path" == "null" ]]; then
+        _error "Destination site path not found in state. Run Step 2.5 first."
+        _log "STEP 8 FAILED: dest_site_path not in state"
+        return 1
+    fi
+
+    source_ssh_user=$(_state_read ".data.source_ssh_user")
+    dest_ssh_user=$(_state_read ".data.dest_ssh_user")
+    [[ -z "$source_ssh_user" || "$source_ssh_user" == "null" ]] && source_ssh_user="${GPBC_SSH_USER:-root}"
+    [[ -z "$dest_ssh_user" || "$dest_ssh_user" == "null" ]] && dest_ssh_user="${GPBC_SSH_USER:-root}"
+    source_ssh_port=$(_state_read ".data.source_ssh_port")
+    dest_ssh_port=$(_state_read ".data.dest_ssh_port")
+
+    known_hosts_file="${STATE_DIR}/${MIG_PREFIX}-${SITE}-known_hosts"
+    mkdir -p "$STATE_DIR" || true
+
+    # Determine if our local ssh supports StrictHostKeyChecking=accept-new
+    local strict_mode="accept-new"
+    local strict_test_err
+    strict_test_err=$(mktemp)
+    ssh -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts_file" \
+        ${dest_ssh_port:+-p "$dest_ssh_port"} "$dest_ssh_user@$dest_server_ip" "echo ok" 2>"$strict_test_err" >/dev/null || true
+    if grep -qi "Bad configuration option" "$strict_test_err"; then
+        strict_mode="no"
+    fi
+    rm -f "$strict_test_err" || true
+
+    local ssh_opts=(-o ConnectTimeout=8 -o BatchMode=yes -o "StrictHostKeyChecking=$strict_mode" -o "UserKnownHostsFile=$known_hosts_file")
 
     if [[ "$DRY_RUN" == "1" ]]; then
+        if [[ -n "$source_wp_config_path" && "$source_wp_config_path" != "null" ]]; then
+            _dry_run_msg "Would copy source wp-config.php to destination: $dest_wp_config_backup_path"
+        else
+            _dry_run_msg "Would copy source wp-config.php to destination as: $dest_wp_config_backup_path (source path not in state; run Step 2.5)"
+        fi
         _dry_run_msg "Would create cyber.html with content 'vm7' in $dest_htdocs_path"
         _dry_run_msg "Would run: gp fix cached $site_url"
         _dry_run_msg "Would run: wp cache flush"
@@ -2891,10 +2934,48 @@ function _step_8() {
         return 0
     fi
 
+    # Step 8.0: Backup source wp-config.php to destination
+    if [[ -z "$source_wp_config_path" || "$source_wp_config_path" == "null" ]]; then
+        _warning "Source wp-config path not found in state. Run Step 2.5 first; skipping wp-config backup."
+        _log "STEP 8 WARNING: source_wp_config_path not in state"
+    else
+        _loading2 "Backing up source wp-config.php to destination as wp-config.php.backup..."
+
+        local exists
+        exists=$(_ssh_capture "$source_server_ip" "test -f '$source_wp_config_path' && echo exists || echo missing")
+        exists=$(echo "$exists" | tr -d '[:space:]')
+        if [[ "$exists" != "exists" ]]; then
+            _warning "Source wp-config.php not found at: $source_wp_config_path (skipping backup)"
+            _log "STEP 8 WARNING: source wp-config missing at $source_wp_config_path"
+        else
+            local tmp_err copy_rc copy_err
+            tmp_err=$(mktemp)
+            (
+                set -o pipefail
+                ssh "${ssh_opts[@]}" ${source_ssh_port:+-p "$source_ssh_port"} "$source_ssh_user@$source_server_ip" "cat '$source_wp_config_path'" 2>>"$tmp_err" \
+                    | ssh "${ssh_opts[@]}" ${dest_ssh_port:+-p "$dest_ssh_port"} "$dest_ssh_user@$dest_server_ip" "cat > '$dest_wp_config_backup_path'" 2>>"$tmp_err"
+            )
+            copy_rc=$?
+            copy_err=$(cat "$tmp_err" || true)
+            rm -f "$tmp_err" || true
+
+            if [[ $copy_rc -ne 0 ]]; then
+                _error "Failed to copy source wp-config.php to destination (exit code: $copy_rc)"
+                [[ -n "$copy_err" ]] && _error "SSH error: $copy_err"
+                _log "STEP 8 FAILED: wp-config backup copy failed (rc=$copy_rc)"
+                _error_log "Step 8: Failed to copy '$source_wp_config_path' to '$dest_wp_config_backup_path' - $copy_err"
+                return 1
+            fi
+
+            _success "Backed up source wp-config.php to: $dest_wp_config_backup_path"
+            _log "STEP 8: Source wp-config.php backed up to destination"
+        fi
+    fi
+
     # Step 8.1: Create cyber.html file for DNS propagation verification
     _loading2 "Creating cyber.html in destination htdocs..."
     local cyber_output cyber_rc
-    cyber_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "echo 'vm7' > '$dest_htdocs_path/cyber.html' 2>&1")
+    cyber_output=$(ssh "${ssh_opts[@]}" ${dest_ssh_port:+-p "$dest_ssh_port"} "$dest_ssh_user@$dest_server_ip" "echo 'vm7' > '$dest_htdocs_path/cyber.html' 2>&1")
     cyber_rc=$?
     if [[ $cyber_rc -eq 0 ]]; then
         _verbose "cyber.html created successfully"
@@ -2908,7 +2989,7 @@ function _step_8() {
     # Step 8.2: Run gp fix cached
     _loading2 "Running gp fix cached $site_url on destination..."
     local gp_fix_output gp_fix_rc
-    gp_fix_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "gp fix cached '$site_url' 2>&1")
+    gp_fix_output=$(ssh "${ssh_opts[@]}" ${dest_ssh_port:+-p "$dest_ssh_port"} "$dest_ssh_user@$dest_server_ip" "gp fix cached '$site_url' 2>&1")
     gp_fix_rc=$?
     if [[ $gp_fix_rc -eq 0 ]]; then
         _verbose "gp fix cached completed successfully"
@@ -2922,7 +3003,7 @@ function _step_8() {
     # Step 8.3: Clear WordPress object cache using wp-cli
     _loading2 "Clearing WordPress object cache on destination..."
     local wp_cache_output wp_cache_rc
-    wp_cache_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "cd '$dest_htdocs_path' && wp cache flush --allow-root 2>&1" 2>&1)
+    wp_cache_output=$(ssh "${ssh_opts[@]}" ${dest_ssh_port:+-p "$dest_ssh_port"} "$dest_ssh_user@$dest_server_ip" "cd '$dest_htdocs_path' && wp cache flush --allow-root 2>&1" 2>&1)
     wp_cache_rc=$?
     if [[ $wp_cache_rc -eq 0 ]]; then
         _verbose "WordPress cache flushed successfully"
