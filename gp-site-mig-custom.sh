@@ -1928,9 +1928,15 @@ function _step_3_4() {
     _verbose "  source_site_path=$source_site_path"
     _verbose "  dest_htdocs_path=$dest_htdocs_path"
 
-    local ssh_user
-    ssh_user=$(_state_read ".data.ssh_user")
-    [[ -z "$ssh_user" ]] && ssh_user="${GPBC_SSH_USER:-root}"
+    local source_ssh_user dest_ssh_user source_ssh_port dest_ssh_port
+    source_ssh_user=$(_state_read ".data.source_ssh_user")
+    dest_ssh_user=$(_state_read ".data.dest_ssh_user")
+    source_ssh_port=$(_state_read ".data.source_ssh_port")
+    dest_ssh_port=$(_state_read ".data.dest_ssh_port")
+    [[ -z "$source_ssh_user" || "$source_ssh_user" == "null" ]] && source_ssh_user="${GPBC_SSH_USER:-root}"
+    [[ -z "$dest_ssh_user" || "$dest_ssh_user" == "null" ]] && dest_ssh_user="${GPBC_SSH_USER:-root}"
+    [[ -z "$source_ssh_port" || "$source_ssh_port" == "null" ]] && source_ssh_port=""
+    [[ -z "$dest_ssh_port" || "$dest_ssh_port" == "null" ]] && dest_ssh_port=""
 
     local known_hosts_file
     known_hosts_file="${STATE_DIR}/${MIG_PREFIX}-${SITE}-known_hosts"
@@ -2174,11 +2180,15 @@ function _step_4() {
     local known_hosts_file
     known_hosts_file="${STATE_DIR}/${MIG_PREFIX}-${SITE}-known_hosts"
 
-    # Build SSH options array for proper argument handling
-    local ssh_opts_array=(-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts_file")
+    # Build SSH options arrays for proper argument handling
+    local base_ssh_opts_array=(-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts_file")
+    local source_ssh_opts_array=("${base_ssh_opts_array[@]}")
+    local dest_ssh_opts_array=("${base_ssh_opts_array[@]}")
+    [[ -n "$source_ssh_port" ]] && source_ssh_opts_array+=( -p "$source_ssh_port" )
+    [[ -n "$dest_ssh_port" ]] && dest_ssh_opts_array+=( -p "$dest_ssh_port" )
 
-    _loading2 "Source DB: $source_db on $ssh_user@$source_server_ip"
-    _loading2 "Dest DB:   $dest_db on $ssh_user@$dest_server_ip"
+    _loading2 "Source DB: $source_db on $source_ssh_user@$source_server_ip"
+    _loading2 "Dest DB:   $dest_db on $dest_ssh_user@$dest_server_ip"
 
     # Validate database names to prevent command injection
     # Database names in MySQL can contain alphanumeric, underscore, and some special chars
@@ -2226,7 +2236,7 @@ function _step_4() {
     _loading2 "Checking for existing migration marker in destination..."
     local existing_marker_sql="SELECT option_value FROM wp_options WHERE option_name='wp_miggp';"
     local existing_marker existing_marker_rc
-    existing_marker=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "mysql $dest_mysql_auth -N $safe_dest_db -e \"$existing_marker_sql\"" 2>&1)
+    existing_marker=$(ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "mysql $dest_mysql_auth -N $safe_dest_db -e \"$existing_marker_sql\"" 2>&1)
     existing_marker_rc=$?
 
     if [[ $existing_marker_rc -eq 0 && -n "$existing_marker" && "$existing_marker" == gpbc_mig_* ]]; then
@@ -2262,7 +2272,7 @@ function _step_4() {
     # Insert marker into source database wp_options table
     local marker_insert_sql="INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('wp_miggp', '$migration_marker_id', 'no') ON DUPLICATE KEY UPDATE option_value='$migration_marker_id';"
     local marker_output marker_rc
-    marker_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "mysql $source_mysql_auth $safe_source_db -e \"$marker_insert_sql\"" 2>&1)
+    marker_output=$(ssh "${source_ssh_opts_array[@]}" "$source_ssh_user@$source_server_ip" "mysql $source_mysql_auth $safe_source_db -e \"$marker_insert_sql\"" 2>&1)
     marker_rc=$?
 
     if [[ $marker_rc -ne 0 ]]; then
@@ -2293,9 +2303,9 @@ function _step_4() {
         
         if [[ "$DRY_RUN" == "1" ]]; then
             _dry_run_msg "Would execute file-based database migration:"
-            _dry_run_msg "  1. ssh $ssh_user@$source_server_ip \"$mysqldump_cmd | gzip > $source_db_path\""
-            _dry_run_msg "  2. scp $ssh_user@$source_server_ip:$source_db_path $ssh_user@$dest_server_ip:$dest_db_path"
-            _dry_run_msg "  3. ssh $ssh_user@$dest_server_ip \"gunzip < $dest_db_path | $mysql_cmd\""
+            _dry_run_msg "  1. ssh $source_ssh_user@$source_server_ip \"$mysqldump_cmd | gzip > $source_db_path\""
+            _dry_run_msg "  2. (transfer) ssh $source_ssh_user@$source_server_ip \"cat $source_db_path\" | ssh $dest_ssh_user@$dest_server_ip \"cat > $dest_db_path\""
+            _dry_run_msg "  3. ssh $dest_ssh_user@$dest_server_ip \"gunzip < $dest_db_path | $mysql_cmd\""
             _dry_run_msg "  4. Cleanup temp files on both servers"
             _log "STEP 4 DRY-RUN: Would migrate database via file"
             _state_add_completed_step "4"
@@ -2305,7 +2315,7 @@ function _step_4() {
         
         _loading2 "Step 1/4: Dumping database on source and compressing..."
         local dump_output dump_rc
-        dump_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "$mysqldump_cmd | gzip > $source_db_path" 2>&1)
+        dump_output=$(ssh "${source_ssh_opts_array[@]}" "$source_ssh_user@$source_server_ip" "$mysqldump_cmd | gzip > $source_db_path" 2>&1)
         dump_rc=$?
         
         _log "DATABASE DUMP OUTPUT: $dump_output"
@@ -2320,7 +2330,7 @@ function _step_4() {
         
         _loading2 "Step 2/4: Transferring compressed database file..."
         local transfer_output transfer_rc
-        transfer_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "cat $source_db_path" 2>&1 | ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "cat > $dest_db_path" 2>&1)
+        transfer_output=$(ssh "${source_ssh_opts_array[@]}" "$source_ssh_user@$source_server_ip" "cat $source_db_path" 2>&1 | ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "cat > $dest_db_path" 2>&1)
         transfer_rc=$?
         
         _log "DATABASE TRANSFER OUTPUT: $transfer_output"
@@ -2330,14 +2340,14 @@ function _step_4() {
             [[ -n "$transfer_output" ]] && _error "Output: $transfer_output"
             _log "STEP 4 FAILED: Database transfer error (rc=$transfer_rc)"
             # Cleanup source file
-            ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
+            ssh "${source_ssh_opts_array[@]}" "$source_ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
             return 1
         fi
         _success "Database file transferred to destination"
         
         _loading2 "Step 3/4: Importing database on destination..."
         local import_output import_rc
-        import_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "gunzip < $dest_db_path | $mysql_cmd" 2>&1)
+        import_output=$(ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "gunzip < $dest_db_path | $mysql_cmd" 2>&1)
         import_rc=$?
         
         _log "DATABASE IMPORT OUTPUT START"
@@ -2354,15 +2364,15 @@ function _step_4() {
             fi
             _log "STEP 4 FAILED: Database import error (rc=$import_rc)"
             # Cleanup files on both servers
-            ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
-            ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "rm -f $dest_db_path" 2>/dev/null || true
+            ssh "${source_ssh_opts_array[@]}" "$source_ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
+            ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "rm -f $dest_db_path" 2>/dev/null || true
             return 1
         fi
         _success "Database imported successfully"
         
         _loading2 "Step 4/4: Cleaning up temporary files..."
-        ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
-        ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "rm -f $dest_db_path" 2>/dev/null || true
+        ssh "${source_ssh_opts_array[@]}" "$source_ssh_user@$source_server_ip" "rm -f $source_db_path" 2>/dev/null || true
+        ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "rm -f $dest_db_path" 2>/dev/null || true
         _success "Temporary files cleaned up"
         
         # Check if there were any warnings in the import output
@@ -2382,13 +2392,13 @@ function _step_4() {
         _loading2 "Using direct pipe database migration"
         
         _verbose "Database migration command (password hidden):"
-        _verbose "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"mysqldump ... $safe_source_db\""
-        _verbose "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
+        _verbose "  ssh ${source_ssh_opts_array[*]} $source_ssh_user@$source_server_ip \"mysqldump ... $safe_source_db\""
+        _verbose "  | ssh ${dest_ssh_opts_array[*]} $dest_ssh_user@$dest_server_ip \"$mysql_cmd\""
 
         if [[ "$DRY_RUN" == "1" ]]; then
             _dry_run_msg "Would execute database migration (auth from source wp-config):"
-            _dry_run_msg "  ssh ${ssh_opts_array[*]} $ssh_user@$source_server_ip \"mysqldump ... $safe_source_db\""
-            _dry_run_msg "  | ssh ${ssh_opts_array[*]} $ssh_user@$dest_server_ip \"$mysql_cmd\""
+            _dry_run_msg "  ssh ${source_ssh_opts_array[*]} $source_ssh_user@$source_server_ip \"mysqldump ... $safe_source_db\""
+            _dry_run_msg "  | ssh ${dest_ssh_opts_array[*]} $dest_ssh_user@$dest_server_ip \"$mysql_cmd\""
             _log "STEP 4 DRY-RUN: Would migrate database"
             _state_add_completed_step "4"
             echo
@@ -2401,7 +2411,7 @@ function _step_4() {
         # Execute the database migration with error handling
         # Use command arrays to avoid eval and properly handle arguments
         local db_output db_rc
-        db_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "$mysqldump_cmd" 2>&1 | ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "$mysql_cmd" 2>&1)
+        db_output=$(ssh "${source_ssh_opts_array[@]}" "$source_ssh_user@$source_server_ip" "$mysqldump_cmd" 2>&1 | ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "$mysql_cmd" 2>&1)
         db_rc=$?
 
         # Log the output
@@ -2439,7 +2449,7 @@ function _step_4() {
     _loading2 "Verifying migration marker in destination database..."
     local verify_sql="SELECT option_value FROM wp_options WHERE option_name='wp_miggp';"
     local verify_output verify_rc
-    verify_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "mysql -N $safe_dest_db -e \"$verify_sql\"" 2>&1)
+    verify_output=$(ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "mysql -N $safe_dest_db -e \"$verify_sql\"" 2>&1)
     verify_rc=$?
 
     if [[ $verify_rc -ne 0 ]]; then
