@@ -77,7 +77,6 @@ function _usage() {
     echo "  4      - Migrate database (mysqldump -> mysql; honors --force-db/--skip-db)"
     echo "  5      - Nginx config migration"
     echo "    5.1  - Detect custom and special configs"
-    echo "    5.3  - Backup and copy nginx directory to destination"
     echo "  6      - Copy user-configs.php (backup destination if present)"
     echo "  7      - Sync domain route to match source"
     echo "  8      - Enable DNS integration on destination (Cloudflare/DNSME, or skip)"
@@ -2584,131 +2583,14 @@ function _step_5_1() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 5.3 - Backup and copy nginx files to destination
-# Creates tar archive of source nginx directory and places it on destination
-# as a backup file (outside the nginx dir) for reference
-# -----------------------------------------------------------------------------
-function _step_5_3() {
-    _loading "Step 5.3: Backup and copy nginx files"
-    _log "STEP 5.3: Backup and copy nginx files"
-
-    local source_server_ip dest_server_ip source_site_path dest_site_path
-    source_server_ip=$(_state_read ".data.source_server_ip")
-    dest_server_ip=$(_state_read ".data.dest_server_ip")
-    source_site_path=$(_state_read ".data.source_site_path")
-    dest_site_path=$(_state_read ".data.dest_site_path")
-
-    if [[ -z "$source_server_ip" || -z "$dest_server_ip" || -z "$source_site_path" || -z "$dest_site_path" ]]; then
-        _error "Missing required state data. Ensure server IPs and site paths exist in state (seed + Step 2.5)."
-        _log "STEP 5.3 FAILED: Missing prerequisite data"
-        return 1
-    fi
-
-    local source_nginx_dir="${source_site_path}/nginx"
-    local tar_filename="nginx-${SITE}-src-backup.tar.gz"
-    local source_tar_path="/tmp/${tar_filename}"
-    # Place backup in site root directory (outside nginx dir)
-    local dest_backup_path="${dest_site_path}/${tar_filename}"
-
-    # Check if source nginx directory exists and has files
-    local check_cmd="test -d '$source_nginx_dir' && ls -1 '$source_nginx_dir' 2>/dev/null | wc -l || echo '0'"
-    local file_count
-    file_count=$(_ssh_capture "$source_server_ip" "$check_cmd")
-    file_count=$(echo "$file_count" | tr -d '[:space:]')
-
-    if [[ "$file_count" == "0" ]]; then
-        _loading3 "No nginx files to backup (directory empty or missing)"
-        _log "STEP 5.3: No nginx files to backup"
-        _state_add_completed_step "5.3"
-        _success "Step 5.3 complete: No files to backup"
-        echo
-        return 0
-    fi
-
-    _loading2 "Found $file_count file(s) in source nginx directory"
-
-    if [[ "$DRY_RUN" == "1" ]]; then
-        _dry_run_msg "Would create tar archive: $tar_filename"
-        _dry_run_msg "Would transfer to destination: $dest_backup_path"
-        _state_add_completed_step "5.3"
-        _success "Step 5.3 complete (dry-run)"
-        echo
-        return 0
-    fi
-
-    # Step 1: Create tar archive on source
-    _loading2 "Creating tar archive on source..."
-    local tar_cmd="cd '$source_site_path' && tar -czf '$source_tar_path' nginx/"
-    local tar_output tar_rc
-    tar_output=$(_ssh_capture "$source_server_ip" "$tar_cmd" 2>&1)
-    tar_rc=$?
-
-    if [[ $tar_rc -ne 0 ]]; then
-        _error "Failed to create tar archive on source (exit code: $tar_rc)"
-        [[ -n "$tar_output" ]] && _error "Output: $tar_output"
-        _log "STEP 5.3 FAILED: tar creation failed"
-        return 1
-    fi
-    _verbose "Tar archive created: $source_tar_path"
-
-    # Step 2: Transfer archive from source to destination (as backup file in site root)
-    _loading2 "Transferring archive to destination as backup..."
-
-    local ssh_user
-    ssh_user=$(_state_read ".data.ssh_user")
-    [[ -z "$ssh_user" ]] && ssh_user="${GPBC_SSH_USER:-root}"
-
-    local known_hosts_file="${STATE_DIR}/${MIG_PREFIX}-${SITE}-known_hosts"
-    local ssh_opts=(-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts_file")
-
-    # Use SSH pipe to transfer (source -> local -> dest) directly to final location
-    local transfer_output transfer_rc
-    transfer_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$source_server_ip" "cat '$source_tar_path'" 2>&1 | ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "cat > '$dest_backup_path'" 2>&1)
-    transfer_rc=$?
-
-    if [[ $transfer_rc -ne 0 ]]; then
-        _error "Failed to transfer tar archive (exit code: $transfer_rc)"
-        [[ -n "$transfer_output" ]] && _error "Output: $transfer_output"
-        # Cleanup source tar
-        _ssh_capture "$source_server_ip" "rm -f '$source_tar_path'" 2>/dev/null || true
-        _log "STEP 5.3 FAILED: transfer failed"
-        return 1
-    fi
-    _verbose "Archive transferred to destination: $dest_backup_path"
-
-    # Step 3: Set ownership to destination system user
-    local dest_system_user_name
-    dest_system_user_name=$(_state_read ".data.dest_system_user_name")
-    if [[ -n "$dest_system_user_name" && "$dest_system_user_name" != "UNKNOWN" && "$dest_system_user_name" != "null" ]]; then
-        _loading2 "Setting ownership to $dest_system_user_name..."
-        _ssh_capture "$dest_server_ip" "chown '$dest_system_user_name:$dest_system_user_name' '$dest_backup_path'" 2>/dev/null || true
-        _verbose "Ownership set to $dest_system_user_name"
-    else
-        _verbose "Skipping chown (dest_system_user_name not set - re-run Step 1 with cache-users)"
-    fi
-
-    # Step 4: Cleanup source tar file (keep backup on destination)
-    _loading2 "Cleaning up temporary files on source..."
-    _ssh_capture "$source_server_ip" "rm -f '$source_tar_path'" 2>/dev/null || true
-    _verbose "Source tar file cleaned up"
-
-    _state_add_completed_step "5.3"
-    _success "Step 5.3 complete: Nginx backup saved to $dest_backup_path"
-    _log "STEP 5.3 COMPLETE: $file_count file(s) backed up to $dest_backup_path"
-    echo
-    return 0
-}
-
-# -----------------------------------------------------------------------------
 # Step 5 - Migrate Nginx Config (wrapper)
-# Calls sub-steps 5.1, 5.3
+# Calls sub-step 5.1
 # -----------------------------------------------------------------------------
 function _step_5() {
     _loading "Step 5: Migrate Nginx Config"
     _log "STEP 5: Starting nginx config migration"
 
     _run_step "5.1" _step_5_1 || return 1
-    _run_step "5.3" _step_5_3 || return 1
 
     _state_add_completed_step "5"
     _log "STEP 5 COMPLETE: Nginx config migration done"
@@ -3879,13 +3761,6 @@ if ! _run_step "5.1" _step_5_1; then
     exit 1
 fi
 
-# Step 5.3: Backup and copy nginx files
-if ! _run_step "5.3" _step_5_3; then
-    _error "Migration failed at Step 5.3"
-    _log "Migration FAILED at Step 5.3"
-    exit 1
-fi
-
 # Step 6: Copy user-configs.php
 if ! _run_step "6" _step_6; then
     _error "Migration failed at Step 6"
@@ -3933,7 +3808,7 @@ fi
 # All steps completed successfully
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|1.1|1.2|2|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|5.3|6|7|8|9|10)
+        1|1.1|1.2|2|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|6|7|8|9|10)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"
