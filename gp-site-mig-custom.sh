@@ -75,7 +75,7 @@ function _usage() {
     echo "    3.3  - Authorize destination SSH key on source"
     echo "    3.4  - Sync htdocs (direct dest->source rsync, --rsync-local fallback)"
     echo "  4      - Migrate database (mysqldump -> mysql; honors --force-db/--skip-db)"
-    echo "  5      - Nginx config migration"
+    echo "  5      - Nginx config check + XML-RPC hardening"
     echo "    5.1  - Detect custom and special configs"
     echo "  6      - Copy user-configs.php (backup destination if present)"
     echo "  7      - Sync domain route to match source"
@@ -2592,6 +2592,42 @@ function _step_5() {
 
     _run_step "5.1" _step_5_1 || return 1
 
+    # If source nginx configs do NOT include XML-RPC disable, enforce it on destination.
+    # This aligns with the intention that XML-RPC should be disabled unless explicitly present.
+    local special_configs
+    special_configs=$(_state_read ".data.nginx_special_configs")
+    if [[ ",${special_configs}," != *",disable-xmlrpc-main-context.conf,"* ]]; then
+        _loading2 "XML-RPC disable config not found on source; enforcing on destination"
+
+        local dest_server_ip
+        dest_server_ip=$(_state_read ".data.dest_server_ip")
+        if [[ -z "$dest_server_ip" || "$dest_server_ip" == "null" ]]; then
+            _error "Missing destination server IP. Ensure dest_server_ip exists in state (seed + Step 2.2)."
+            _log "STEP 5 FAILED: Missing dest_server_ip"
+            return 1
+        fi
+
+        if [[ "$DRY_RUN" == "1" ]]; then
+            _dry_run_msg "Would execute on destination: gp site $SITE -disable-xmlrpc"
+        else
+            local gp_cmd cmd_output cmd_rc
+            gp_cmd="gp site $SITE -disable-xmlrpc"
+            cmd_output=$(_ssh_capture "$dest_server_ip" "$gp_cmd" 2>&1)
+            cmd_rc=$?
+            if [[ $cmd_rc -ne 0 ]]; then
+                _error "Failed to disable XML-RPC on destination (exit code: $cmd_rc)"
+                [[ -n "$cmd_output" ]] && _error "Output: $cmd_output"
+                _log "STEP 5 FAILED: disable-xmlrpc command failed (rc=$cmd_rc)"
+                _error_log "Step 5: Failed to run '$gp_cmd' on destination - $cmd_output"
+                return 1
+            fi
+            _success "XML-RPC disabled on destination"
+            _log "STEP 5: Successfully disabled XML-RPC on destination"
+        fi
+    else
+        _verbose "Source already includes disable-xmlrpc-main-context.conf; no enforcement needed"
+    fi
+
     _state_add_completed_step "5"
     _log "STEP 5 COMPLETE: Nginx config migration done"
     return 0
@@ -3754,10 +3790,10 @@ if ! _run_step "4" _step_4; then
     exit 1
 fi
 
-# Step 5.1: Check for custom nginx configs
-if ! _run_step "5.1" _step_5_1; then
-    _error "Migration failed at Step 5.1"
-    _log "Migration FAILED at Step 5.1"
+# Step 5: Nginx config check + XML-RPC enforcement
+if ! _run_step "5" _step_5; then
+    _error "Migration failed at Step 5"
+    _log "Migration FAILED at Step 5"
     exit 1
 fi
 
