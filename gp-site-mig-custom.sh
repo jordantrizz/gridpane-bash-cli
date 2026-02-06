@@ -77,7 +77,6 @@ function _usage() {
     echo "  4      - Migrate database (mysqldump -> mysql; honors --force-db/--skip-db)"
     echo "  5      - Nginx config check + XML-RPC hardening"
     echo "    5.1  - Detect custom and special configs"
-    echo "  6      - Copy user-configs.php (backup destination if present)"
     echo "  7      - Sync domain route to match source"
     echo "  8      - Enable DNS integration on destination (Cloudflare/DNSME, or skip)"
     echo "  9      - Enable SSL on destination if source has SSL"
@@ -2634,144 +2633,6 @@ function _step_5() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 6 - Copy user-configs.php
-# Checks for user-configs.php on source, backs up existing on destination,
-# then copies from source to destination
-# -----------------------------------------------------------------------------
-function _step_6() {
-    _loading "Step 6: Copy user-configs.php"
-    _log "STEP 6: Starting user-configs.php migration"
-
-    local source_server_ip dest_server_ip source_site_path dest_site_path
-    source_server_ip=$(_state_read ".data.source_server_ip")
-    dest_server_ip=$(_state_read ".data.dest_server_ip")
-    source_site_path=$(_state_read ".data.source_site_path")
-    dest_site_path=$(_state_read ".data.dest_site_path")
-
-    if [[ -z "$source_server_ip" || -z "$dest_server_ip" || -z "$source_site_path" || -z "$dest_site_path" ]]; then
-        _error "Missing required state data. Ensure server IPs and site paths exist in state (seed + Step 2.5)."
-        _log "STEP 6 FAILED: Missing prerequisite data"
-        return 1
-    fi
-
-    local source_user_config="${source_site_path}/user-configs.php"
-    local dest_user_config="${dest_site_path}/user-configs.php"
-
-    # Check if user-configs.php exists on source
-    _loading2 "Checking for user-configs.php on source..."
-    local check_cmd="test -f '$source_user_config' && echo 'exists' || echo 'missing'"
-    local source_check
-    source_check=$(_ssh_capture "$source_server_ip" "$check_cmd")
-    source_check=$(echo "$source_check" | tr -d '[:space:]')
-
-    if [[ "$source_check" != "exists" ]]; then
-        _loading3 "No user-configs.php found on source server"
-        _log "STEP 6: No user-configs.php on source, skipping"
-        _state_add_completed_step "6"
-        _success "Step 6 complete: No user-configs.php to copy"
-        echo
-        return 0
-    fi
-
-    _loading2 "Found user-configs.php on source"
-
-    if [[ "$DRY_RUN" == "1" ]]; then
-        _dry_run_msg "Would backup destination user-configs.php (if exists)"
-        _dry_run_msg "Would copy user-configs.php from source to destination"
-        _state_add_completed_step "6"
-        _success "Step 6 complete (dry-run)"
-        echo
-        return 0
-    fi
-
-    local ssh_user
-    ssh_user=$(_state_read ".data.ssh_user")
-    [[ -z "$ssh_user" ]] && ssh_user="${GPBC_SSH_USER:-root}"
-
-    local known_hosts_file="${STATE_DIR}/${MIG_PREFIX}-${SITE}-known_hosts"
-    local ssh_opts=(-o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts_file")
-
-    # Check if user-configs.php exists on destination (for backup)
-    _loading2 "Checking for existing user-configs.php on destination..."
-    local dest_check
-    dest_check=$(_ssh_capture "$dest_server_ip" "test -f '$dest_user_config' && echo 'exists' || echo 'missing'")
-    dest_check=$(echo "$dest_check" | tr -d '[:space:]')
-
-    if [[ "$dest_check" == "exists" ]]; then
-        # Show diff between source and destination
-        _loading2 "Comparing source and destination user-configs.php..."
-        local source_content dest_content
-        source_content=$(ssh "${ssh_opts[@]}" "$ssh_user@$source_server_ip" "cat '$source_user_config'" 2>/dev/null)
-        dest_content=$(ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "cat '$dest_user_config'" 2>/dev/null)
-
-        if [[ "$source_content" == "$dest_content" ]]; then
-            _loading3 "Files are identical, no changes needed"
-            _log "STEP 6: user-configs.php files are identical, skipping"
-            _state_add_completed_step "6"
-            _success "Step 6 complete: user-configs.php already in sync"
-            echo
-            return 0
-        fi
-
-        echo
-        echo "--- Differences between source and destination user-configs.php ---"
-        diff --color=auto <(echo "$dest_content") <(echo "$source_content") || true
-        echo "--- End of diff (destination <- source) ---"
-        echo
-
-        # Backup existing file
-        local backup_file="${dest_site_path}/user-config-src-backup.php"
-
-        _loading2 "Backing up existing user-configs.php to: user-config-src-backup.php"
-        local backup_cmd="cp '$dest_user_config' '$backup_file'"
-        local backup_output backup_rc
-        backup_output=$(_ssh_capture "$dest_server_ip" "$backup_cmd" 2>&1)
-        backup_rc=$?
-
-        if [[ $backup_rc -ne 0 ]]; then
-            _error "Failed to backup existing user-configs.php (exit code: $backup_rc)"
-            [[ -n "$backup_output" ]] && _error "Output: $backup_output"
-            _log "STEP 6 WARNING: backup failed, continuing with copy"
-            _error_log "Step 6: Failed to backup user-configs.php - $backup_output"
-        else
-            _verbose "Backup created: $backup_file"
-            # Set ownership to destination system user
-            local dest_system_user_name
-            dest_system_user_name=$(_state_read ".data.dest_system_user_name")
-            if [[ -n "$dest_system_user_name" && "$dest_system_user_name" != "UNKNOWN" && "$dest_system_user_name" != "null" ]]; then
-                _loading2 "Setting backup ownership to $dest_system_user_name..."
-                _ssh_capture "$dest_server_ip" "chown '$dest_system_user_name:$dest_system_user_name' '$backup_file'" 2>/dev/null || true
-                _verbose "Backup ownership set to $dest_system_user_name"
-            else
-                _verbose "Skipping chown (dest_system_user_name not set)"
-            fi
-        fi
-    else
-        _verbose "No existing user-configs.php on destination, skipping backup"
-    fi
-
-    # Copy user-configs.php from source to destination
-    _loading2 "Copying user-configs.php from source to destination..."
-    local transfer_output transfer_rc
-    transfer_output=$(ssh "${ssh_opts[@]}" "$ssh_user@$source_server_ip" "cat '$source_user_config'" 2>&1 | \
-        ssh "${ssh_opts[@]}" "$ssh_user@$dest_server_ip" "cat > '$dest_user_config'" 2>&1)
-    transfer_rc=$?
-
-    if [[ $transfer_rc -ne 0 ]]; then
-        _error "Failed to copy user-configs.php (exit code: $transfer_rc)"
-        [[ -n "$transfer_output" ]] && _error "Output: $transfer_output"
-        _log "STEP 6 FAILED: copy failed"
-        return 1
-    fi
-
-    _state_add_completed_step "6"
-    _success "Step 6 complete: user-configs.php copied successfully"
-    _log "STEP 6 COMPLETE: user-configs.php migrated"
-    echo
-    return 0
-}
-
-# -----------------------------------------------------------------------------
 # Step 7 - Sync Domain Route
 # Compares source and destination domain routes, updates destination if different
 # Route values: none, www, root
@@ -3797,13 +3658,6 @@ if ! _run_step "5" _step_5; then
     exit 1
 fi
 
-# Step 6: Copy user-configs.php
-if ! _run_step "6" _step_6; then
-    _error "Migration failed at Step 6"
-    _log "Migration FAILED at Step 6"
-    exit 1
-fi
-
 # Step 7-9: Domain route, DNS integration, SSL
 CUSTOM_SOURCE_MODE=$(_state_read ".data.custom_source")
 if [[ "$CUSTOM_SOURCE_MODE" == "1" ]]; then
@@ -3844,7 +3698,7 @@ fi
 # All steps completed successfully
 if [[ -n "$RUN_STEP" ]]; then
     case "$RUN_STEP" in
-        1|1.1|1.2|2|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|6|7|8|9|10)
+        1|1.1|1.2|2|2.2|2.3|2.4|2.5|3|3.1|3.2|3.3|3.4|4|5|5.1|7|8|9|10)
             ;;
         *)
             _error "Requested step '$RUN_STEP' is not implemented yet"
