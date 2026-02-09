@@ -1,0 +1,6 @@
+# Rocket.net to GridPane custom-source site migration example for --csv seeding
+# Format: url,source_server_ip,source_ssh_user,dest_site_id,dest_server_id,dest_server_label,dest_server_ip,dest_system_user_id,dest_system_user_name,dest_ssh_user[,dest_profile]
+#
+# Example entries:
+rocket-example.com,203.0.113.10,rocketuser,66666,202,gp-dest-1,203.0.113.20,9002,gpuser,root
+rocket-example2.com,203.0.113.11,rocketuser,77777,203,gp-dest-2,203.0.113.21,9003,gpuser,root,MYPROFILE

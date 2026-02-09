@@ -1,0 +1,1 @@
+cloudflare --profile CYBER change record $1 content vm7-vh3-useast-big.optikhosting.com newtype cname

@@ -1869,11 +1869,12 @@ function _gp_api_get_site_formatted () {
         return 1
     fi
     
-    # Output formatted table header
-    printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
+    # Output formatted table header (9 columns)
+    local _fmt="%-8s %-40s %-5s %-12s %-10s %-20s %-10s %-12s %-12s\n"
+    printf "$_fmt" \
         "ID" "URL" "SSL" "SSL Status" "Server ID" "Server Name" "User ID" "System UID" "Nginx Cache"
-    printf "%-8s %-40s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
-        "--------" "----------------------------------------" "------------"  "----------" "--------------------" "--------" "------------" "---------------"
+    printf "$_fmt" \
+        "--------" "----------------------------------------" "-----" "------------" "----------" "--------------------" "----------" "------------" "------------"
     
     # Process each site instance
     for ((i=0; i<sites_count; i++)); do
@@ -1906,7 +1907,7 @@ function _gp_api_get_site_formatted () {
         fi
 
         # Output this site's data
-        printf "%-8s %-40s %-12s %-12s %-10s %-20s %-8s %-12s %-15s\n" \
+        printf "$_fmt" \
             "$id" "$url" "$is_ssl" "$ssl_status" "$server_id" "$servername" "$user_id" "$system_userid" "$nginx_caching"
         
         # Show domains associated with this site
