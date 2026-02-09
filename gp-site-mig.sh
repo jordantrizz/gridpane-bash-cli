@@ -1574,6 +1574,9 @@ f="$1"
 dbg="${2:-0}"
 db=""
 
+# Extract $table_prefix (e.g. $table_prefix = 'wp_';)
+prefix=$(sed -n "s/^[[:space:]]*\$table_prefix[[:space:]]*=[[:space:]]*['\"]\([^'\"]*\)['\"][[:space:]]*;.*/\1/p" "$f" 2>/dev/null | head -n1)
+
 # Extract DB_NAME from define(DB_NAME, value) lines (single- or double-quoted).
 sq=$(printf "%b" "\\047")
 dq=$(printf "%b" "\\042")
@@ -1598,13 +1601,15 @@ if [[ -n "$line" ]]; then
     [[ "$dbg" == "1" ]] && echo "DBG: extracted db=$db" >&2
 fi
 
-echo -n "$db"' --
+printf "%s|%s" "$db" "$prefix"' --
 EOF
 )
     cmd="${cmd%$'\n'}"
 
-    local source_db dest_db
-    source_db=$(_ssh_capture "$source_server_ip" "$cmd '$source_wp_config' '$DEBUG'")
+    local source_db dest_db source_table_prefix dest_table_prefix
+    local source_tuple dest_tuple
+    source_tuple=$(_ssh_capture "$source_server_ip" "$cmd '$source_wp_config' '$DEBUG'")
+    IFS='|' read -r source_db source_table_prefix <<< "$source_tuple"
     if [[ -z "$source_db" ]]; then
         if [[ "$DEBUG" == "1" ]]; then
             local dbg_cmd dbg_out
@@ -1629,7 +1634,8 @@ EOF
         return 1
     fi
 
-    dest_db=$(_ssh_capture "$dest_server_ip" "$cmd '$dest_wp_config' '$DEBUG'")
+    dest_tuple=$(_ssh_capture "$dest_server_ip" "$cmd '$dest_wp_config' '$DEBUG'")
+    IFS='|' read -r dest_db dest_table_prefix <<< "$dest_tuple"
     if [[ -z "$dest_db" ]]; then
         if [[ "$DEBUG" == "1" ]]; then
             local dbg_cmd dbg_out
@@ -1663,6 +1669,12 @@ EOF
     _state_write ".data.source_db_name" "$source_db"
     _state_write ".data.dest_db_name" "$dest_db"
     _state_write ".data.db_name" "$source_db"
+
+    [[ -z "$source_table_prefix" || "$source_table_prefix" == "null" ]] && source_table_prefix="wp_"
+    [[ -z "$dest_table_prefix" || "$dest_table_prefix" == "null" ]] && dest_table_prefix="wp_"
+    _state_write ".data.source_table_prefix" "$source_table_prefix"
+    _state_write ".data.dest_table_prefix" "$dest_table_prefix"
+    _state_write ".data.table_prefix" "$source_table_prefix"
 
     _state_add_completed_step "2.3"
     _log "STEP 2.3 COMPLETE: DB_NAME extracted"
@@ -2342,12 +2354,27 @@ function _step_4() {
     local mysqldump_cmd="mysqldump --single-transaction --quick --lock-tables=false --routines --triggers $safe_source_db"
     local mysql_cmd="mysql $safe_dest_db"
 
+    local source_table_prefix dest_table_prefix
+    source_table_prefix=$(_state_read ".data.source_table_prefix")
+    dest_table_prefix=$(_state_read ".data.dest_table_prefix")
+    [[ -z "$source_table_prefix" || "$source_table_prefix" == "null" ]] && source_table_prefix="wp_"
+    [[ -z "$dest_table_prefix" || "$dest_table_prefix" == "null" ]] && dest_table_prefix="$source_table_prefix"
+
+    local source_options_table="${source_table_prefix}options"
+    local dest_options_table="${dest_table_prefix}options"
+
     # Check if migration marker already exists in destination database
     _loading2 "Checking for existing migration marker in destination..."
-    local existing_marker_sql="SELECT option_value FROM wp_options WHERE option_name='wp_miggp';"
+    local existing_marker_sql="SELECT option_value FROM ${dest_options_table} WHERE option_name='wp_miggp';"
     local existing_marker existing_marker_rc
     existing_marker=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "mysql -N $safe_dest_db -e \"$existing_marker_sql\"" 2>&1)
     existing_marker_rc=$?
+
+    if [[ $existing_marker_rc -ne 0 && "$dest_options_table" != "$source_options_table" ]]; then
+        existing_marker_sql="SELECT option_value FROM ${source_options_table} WHERE option_name='wp_miggp';"
+        existing_marker=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "mysql -N $safe_dest_db -e \"$existing_marker_sql\"" 2>&1)
+        existing_marker_rc=$?
+    fi
 
     if [[ $existing_marker_rc -eq 0 && -n "$existing_marker" && "$existing_marker" == gpbc_mig_* ]]; then
         _warning "Migration marker already exists in destination database!"
@@ -2379,8 +2406,8 @@ function _step_4() {
     _loading2 "Inserting migration marker: $migration_marker_id"
     _log "Migration marker ID: $migration_marker_id"
 
-    # Insert marker into source database wp_options table
-    local marker_insert_sql="INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('wp_miggp', '$migration_marker_id', 'no') ON DUPLICATE KEY UPDATE option_value='$migration_marker_id';"
+    # Insert marker into source database {prefix}options table
+    local marker_insert_sql="INSERT INTO ${source_options_table} (option_name, option_value, autoload) VALUES ('wp_miggp', '$migration_marker_id', 'no') ON DUPLICATE KEY UPDATE option_value='$migration_marker_id';"
     local marker_output marker_rc
     marker_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$source_server_ip" "mysql $safe_source_db -e \"$marker_insert_sql\"" 2>&1)
     marker_rc=$?
@@ -2557,7 +2584,7 @@ function _step_4() {
 
     # Verify migration by checking for the marker in destination database
     _loading2 "Verifying migration marker in destination database..."
-    local verify_sql="SELECT option_value FROM wp_options WHERE option_name='wp_miggp';"
+    local verify_sql="SELECT option_value FROM ${source_options_table} WHERE option_name='wp_miggp';"
     local verify_output verify_rc
     verify_output=$(ssh "${ssh_opts_array[@]}" "$ssh_user@$dest_server_ip" "mysql -N $safe_dest_db -e \"$verify_sql\"" 2>&1)
     verify_rc=$?

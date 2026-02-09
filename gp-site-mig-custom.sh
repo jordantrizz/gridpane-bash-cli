@@ -1607,17 +1607,20 @@ db=$(get_const "DB_NAME")
 user=$(get_const "DB_USER")
 pass=$(get_const "DB_PASSWORD")
 
+# Extract $table_prefix (e.g. $table_prefix = 'wp_';)
+prefix=$(sed -n "s/^[[:space:]]*\$table_prefix[[:space:]]*=[[:space:]]*['\"]\([^'\"]*\)['\"][[:space:]]*;.*/\1/p" "$f" 2>/dev/null | head -n1)
+
 # Return as pipe-delimited tuple to avoid newlines
-printf "%s|%s|%s" "$db" "$user" "$pass"' --
+printf "%s|%s|%s|%s" "$db" "$user" "$pass" "$prefix"' --
 EOF
 )
         cmd="${cmd%$'\n'}"
 
-    local source_db dest_db source_db_user source_db_pass
+    local source_db dest_db source_db_user source_db_pass source_table_prefix dest_table_prefix
     local source_tuple dest_tuple
 
     source_tuple=$(_ssh_capture "$source_server_ip" "$cmd '$source_wp_config' '$DEBUG'")
-    IFS='|' read -r source_db source_db_user source_db_pass <<< "$source_tuple"
+    IFS='|' read -r source_db source_db_user source_db_pass source_table_prefix <<< "$source_tuple"
     if [[ -z "$source_db" ]]; then
         if [[ "$DEBUG" == "1" ]]; then
             local dbg_cmd dbg_out
@@ -1643,7 +1646,7 @@ EOF
     fi
 
     dest_tuple=$(_ssh_capture "$dest_server_ip" "$cmd '$dest_wp_config' '$DEBUG'")
-    IFS='|' read -r dest_db _ _ <<< "$dest_tuple"
+    IFS='|' read -r dest_db _ _ dest_table_prefix <<< "$dest_tuple"
     if [[ -z "$dest_db" ]]; then
         if [[ "$DEBUG" == "1" ]]; then
             local dbg_cmd dbg_out
@@ -1681,6 +1684,13 @@ EOF
     _state_write ".data.source_db_password" "$source_db_pass"
     _state_write ".data.db_user" "$source_db_user"
     _state_write ".data.db_password" "$source_db_pass"
+
+    # Store WordPress table prefix (used by Step 4 marker checks)
+    [[ -z "$source_table_prefix" || "$source_table_prefix" == "null" ]] && source_table_prefix="wp_"
+    [[ -z "$dest_table_prefix" || "$dest_table_prefix" == "null" ]] && dest_table_prefix="wp_"
+    _state_write ".data.source_table_prefix" "$source_table_prefix"
+    _state_write ".data.dest_table_prefix" "$dest_table_prefix"
+    _state_write ".data.table_prefix" "$source_table_prefix"
 
     _state_add_completed_step "2.3"
     _log "STEP 2.3 COMPLETE: DB_NAME extracted"
@@ -2431,12 +2441,29 @@ function _step_4() {
     local mysqldump_cmd="mysqldump --single-transaction --quick --lock-tables=false --routines --triggers$source_mysql_auth $safe_source_db"
     local mysql_cmd="mysql $dest_mysql_auth $safe_dest_db"
 
+    local source_table_prefix dest_table_prefix
+    source_table_prefix=$(_state_read ".data.source_table_prefix")
+    dest_table_prefix=$(_state_read ".data.dest_table_prefix")
+    [[ -z "$source_table_prefix" || "$source_table_prefix" == "null" ]] && source_table_prefix="wp_"
+    [[ -z "$dest_table_prefix" || "$dest_table_prefix" == "null" ]] && dest_table_prefix="$source_table_prefix"
+
+    local source_options_table="${source_table_prefix}options"
+    local dest_options_table="${dest_table_prefix}options"
+
     # Check if migration marker already exists in destination database
     _loading2 "Checking for existing migration marker in destination..."
-    local existing_marker_sql="SELECT option_value FROM wp_options WHERE option_name='wp_miggp';"
+    local existing_marker_sql="SELECT option_value FROM ${dest_options_table} WHERE option_name='wp_miggp';"
     local existing_marker existing_marker_rc
     existing_marker=$(ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "mysql $dest_mysql_auth -N $safe_dest_db -e \"$existing_marker_sql\"" 2>&1)
     existing_marker_rc=$?
+
+    # If the destination wp-config prefix differs from the source, the destination DB might already
+    # contain tables under the source prefix (e.g., reruns). Try the source prefix as a fallback.
+    if [[ $existing_marker_rc -ne 0 && "$dest_options_table" != "$source_options_table" ]]; then
+        existing_marker_sql="SELECT option_value FROM ${source_options_table} WHERE option_name='wp_miggp';"
+        existing_marker=$(ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "mysql $dest_mysql_auth -N $safe_dest_db -e \"$existing_marker_sql\"" 2>&1)
+        existing_marker_rc=$?
+    fi
 
     if [[ $existing_marker_rc -eq 0 && -n "$existing_marker" && "$existing_marker" == gpbc_mig_* ]]; then
         _warning "Migration marker already exists in destination database!"
@@ -2468,8 +2495,8 @@ function _step_4() {
     _loading2 "Inserting migration marker: $migration_marker_id"
     _log "Migration marker ID: $migration_marker_id"
 
-    # Insert marker into source database wp_options table
-    local marker_insert_sql="INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('wp_miggp', '$migration_marker_id', 'no') ON DUPLICATE KEY UPDATE option_value='$migration_marker_id';"
+    # Insert marker into source database {prefix}options table
+    local marker_insert_sql="INSERT INTO ${source_options_table} (option_name, option_value, autoload) VALUES ('wp_miggp', '$migration_marker_id', 'no') ON DUPLICATE KEY UPDATE option_value='$migration_marker_id';"
     local marker_output marker_rc
     marker_output=$(ssh "${source_ssh_opts_array[@]}" "$source_ssh_user@$source_server_ip" "mysql $source_mysql_auth $safe_source_db -e \"$marker_insert_sql\"" 2>&1)
     marker_rc=$?
@@ -2654,7 +2681,7 @@ function _step_4() {
 
     # Verify migration by checking for the marker in destination database
     _loading2 "Verifying migration marker in destination database..."
-    local verify_sql="SELECT option_value FROM wp_options WHERE option_name='wp_miggp';"
+    local verify_sql="SELECT option_value FROM ${source_options_table} WHERE option_name='wp_miggp';"
     local verify_output verify_rc
     verify_output=$(ssh "${dest_ssh_opts_array[@]}" "$dest_ssh_user@$dest_server_ip" "mysql -N $safe_dest_db -e \"$verify_sql\"" 2>&1)
     verify_rc=$?
