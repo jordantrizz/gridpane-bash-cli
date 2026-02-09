@@ -29,6 +29,32 @@ LOG_DIR="$SCRIPT_DIR/logs"
 DATA_FILE=""
 DATA_FORMAT=""
 
+# ----------------------------------------------------------------------------
+# Step message context
+# Append the domain being migrated to the end of step messages: "... (domain.com)"
+# ----------------------------------------------------------------------------
+if declare -F _loading >/dev/null 2>&1; then
+    eval "$(declare -f _loading | sed '1s/^_loading/_gpbc_loading_orig/')"
+    _loading() {
+        local msg="$1"
+        if [[ -n "${SITE:-}" && "$msg" == Step* && "$msg" != *" (${SITE})" ]]; then
+            msg+=" (${SITE})"
+        fi
+        _gpbc_loading_orig "$msg"
+    }
+fi
+
+if declare -F _success >/dev/null 2>&1; then
+    eval "$(declare -f _success | sed '1s/^_success/_gpbc_success_orig/')"
+    _success() {
+        local msg="$1"
+        if [[ -n "${SITE:-}" && "$msg" == Step* && "$msg" != *" (${SITE})" ]]; then
+            msg+=" (${SITE})"
+        fi
+        _gpbc_success_orig "$msg"
+    }
+fi
+
 # -----------------------------------------------------------------------------
 # Usage
 # -----------------------------------------------------------------------------
