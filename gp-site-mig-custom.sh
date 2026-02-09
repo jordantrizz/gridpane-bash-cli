@@ -1608,7 +1608,19 @@ user=$(get_const "DB_USER")
 pass=$(get_const "DB_PASSWORD")
 
 # Extract $table_prefix (e.g. $table_prefix = 'wp_';)
-prefix=$(sed -n "s/^[[:space:]]*\$table_prefix[[:space:]]*=[[:space:]]*['\"]\([^'\"]*\)['\"][[:space:]]*;.*/\1/p" "$f" 2>/dev/null | head -n1)
+# NOTE: This script runs inside: bash -lc '...'
+# Avoid embedding literal single quotes here (they would terminate the outer quote).
+prefix_line=$(grep -m1 "table_prefix" "$f" 2>/dev/null || true)
+prefix=""
+if [[ -n "$prefix_line" ]]; then
+    sq=$(printf "%b" "\\047")
+    dq=$(printf "%b" "\\042")
+    if echo "$prefix_line" | grep -q "$sq"; then
+        prefix=$(printf "%s" "$prefix_line" | cut -d"$sq" -f2)
+    elif echo "$prefix_line" | grep -q "$dq"; then
+        prefix=$(printf "%s" "$prefix_line" | cut -d"$dq" -f2)
+    fi
+fi
 
 # Return as pipe-delimited tuple to avoid newlines
 printf "%s|%s|%s|%s" "$db" "$user" "$pass" "$prefix"' --
