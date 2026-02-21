@@ -7,8 +7,8 @@ VERSION="$(cat $SCRIPT_DIR/VERSION)"
 GP_API_URL="https://my.gridpane.com/oauth/api/v1"
 
 # Source shared functions
-source "$SCRIPT_DIR/gp-inc.sh"
-source "$SCRIPT_DIR/gp-inc-api.sh"
+source "$SCRIPT_DIR/inc/gp-inc.sh"
+source "$SCRIPT_DIR/inc/gp-inc-api.sh"
 
 # Migration-specific globals
 DRY_RUN="0"

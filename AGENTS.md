@@ -12,7 +12,7 @@
 
 ### Cache System
 * Cache files are stored at `${CACHE_DIR}/${GPBC_TOKEN_NAME}_<endpoint>.json`
-* When adding a new cache type (e.g., "domains"), update the case statements in `_check_cache_with_options()` in `gp-inc.sh`
+* When adding a new cache type (e.g., "domains"), update the case statements in `_check_cache_with_options()` in `inc/gp-inc.sh`
 * Use `_check_cache_with_options "$CACHE_FILE" "<type>"` for consistent cache prompting behavior
 * Default pagination is `GPBC_DEFAULT_PER_PAGE=500` for all cache operations
 
@@ -21,9 +21,9 @@
 * The `gp_api` function handles 429 rate limiting with 15-second backoff and 1 retry
 
 ### Adding New Commands
-1. Add cache function `_gp_api_cache_<type>()` in `gp-inc-api.sh`
-2. Add list/get functions in `gp-inc-api.sh`
-3. Add cache type to case statements in `_check_cache_with_options()` in `gp-inc.sh`
+1. Add cache function `_gp_api_cache_<type>()` in `inc/gp-inc-api.sh`
+2. Add list/get functions in `inc/gp-inc-api.sh`
+3. Add cache type to case statements in `_check_cache_with_options()` in `inc/gp-inc.sh`
 4. Add command handlers in `gp-api.sh`
 5. Add usage help text in `_usage()` in `gp-api.sh`
 

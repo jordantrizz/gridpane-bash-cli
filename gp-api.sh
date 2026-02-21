@@ -4,11 +4,11 @@ TOKEN_FILE="$HOME/.gridpane"
 CACHE_DIR="$HOME/.gpbc-cache"
 VERSION="$(cat $SCRIPT_DIR/VERSION)"
 CACHE_ENABLED="1"
-source "$SCRIPT_DIR/gp-inc.sh"
-source "$SCRIPT_DIR/gp-inc-api.sh"
-source "$SCRIPT_DIR/gp-inc-reports.sh"
-source "$SCRIPT_DIR/gp-inc-compare.sh"
-source "$SCRIPT_DIR/gp-inc-doc.sh"
+source "$SCRIPT_DIR/inc/gp-inc.sh"
+source "$SCRIPT_DIR/inc/gp-inc-api.sh"
+source "$SCRIPT_DIR/inc/gp-inc-reports.sh"
+source "$SCRIPT_DIR/inc/gp-inc-compare.sh"
+source "$SCRIPT_DIR/inc/gp-inc-doc.sh"
 [[ -z $DATA_DIR ]] && { DATA_DIR="$SCRIPT_DIR/data"; }
 
 # =======================================

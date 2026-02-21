@@ -8,7 +8,7 @@
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/gp-inc.sh"
+source "$SCRIPT_DIR/inc/gp-inc.sh"
 
 # -- Defaults
 SSH_USER="root"
